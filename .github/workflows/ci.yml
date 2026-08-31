@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements-dev.txt
+      - run: python -m ruff check app tests alembic scripts
+      - run: python -m mypy app scripts
+      - run: python -m pytest -q
+        env:
+          DATABASE_URL: sqlite+aiosqlite:///./ci.db
+
+  evaluation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r evaluation/requirements-dev.txt
+      - run: python -m ruff check evaluation --config evaluation/pyproject.toml
+      - run: python -m pytest evaluation/tests -q
+      - run: python -m evaluation.generate_dataset --count 500 --seed 42
+      - run: python -m evaluation.run_evaluation --dataset evaluation/datasets/generated/dataset_500_seed42.json
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm ci
+      - run: npx tsc -b
+      - run: npx oxlint
+      - run: npm run build

@@ -1,0 +1,46 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.sqlite3
+*.sqlite3-journal
+# The .env.example-documented local SQLite fallback (DATABASE_URL=sqlite+...)
+# and any ad-hoc dev/smoke-test databases use a plain .db extension.
+*.db
+*.db-journal
+
+# --- Node / Frontend ---
+node_modules/
+frontend/dist/
+frontend/.vite/
+*.tsbuildinfo
+
+# --- Env / secrets ---
+.env
+.env.*
+!.env.example
+
+# --- Generated data (do not commit large synthetic datasets) ---
+evaluation/datasets/generated/
+evaluation/reports/
+!evaluation/reports/.gitkeep
+
+# --- Logs ---
+*.log
+
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# --- Coverage ---
+htmlcov/
+.coverage
+coverage.xml
