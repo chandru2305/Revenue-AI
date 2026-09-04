@@ -23,7 +23,7 @@ component that benefits from being its own network service yet.
                     │  domain/ (state machine,   │
                     │  policy engine, provider   │
                     │  interface — pure, no I/O) │
-                    │  ai/ (Gemini via a         │
+                    │  ai/ (Groq via the         │
                     │  provider interface —      │
                     │  reasons only, never       │
                     │  authorizes; see           │
@@ -69,7 +69,7 @@ backend/app/
   repositories/  Query construction (SQLAlchemy) — no business logic
   domain/        Pure logic: enums, state machine, policy engine, provider interface
                  (no SQLAlchemy, no FastAPI, no I/O — this is what's unit-tested hardest)
-  ai/            AI provider abstraction (Gemini + fake), prompts, orchestration —
+  ai/            AI provider abstraction (Groq + fake), prompts, orchestration —
                  reasons only; contains no policy logic (see docs/ai-safety.md)
   payments/      Razorpay provider abstraction (real + fake), webhook signature
                  verification/parsing — only execution_service and the webhook
@@ -182,6 +182,18 @@ added the ingestion entry point (`POST /payments`, `POST /recovery-cases`,
   from this deployment's own database (Phase 3) — never combined with the
   simulated summary above. See docs/razorpay-integration.md "Simulated
   vs. real evaluation."
+- `POST /api/v1/orchestrator/cycle` — run one pass of the autonomous loop
+  (discover → diagnose → decide → act) on demand; `?auto_execute=` overrides
+  `ORCHESTRATOR_AUTO_EXECUTE` for that pass only. See
+  `backend/app/services/orchestrator_service.py`.
+- `GET /api/v1/orchestrator/status` — read-only snapshot of the autonomous
+  agent for the dashboard's Command Center: whether the background loop is
+  running, cycles completed, and the last cycle's counts — all reconstructed
+  from the append-only audit trail. Starts nothing, changes nothing.
+- `GET /api/v1/system/info` — how this deployment is wired: provider modes
+  (`demo_mode` when payment execution is simulated), whether the orchestrator
+  is enabled, and the deterministic policy limits the engine enforces, so the
+  frontend renders the AI → policy comparison against real thresholds.
 
 Pydantic schemas (`backend/app/schemas/`) are the only thing the API ever
 serializes — ORM models never cross the API boundary directly.
@@ -189,42 +201,66 @@ serializes — ORM models never cross the API boundary directly.
 ## Frontend
 
 React + TypeScript + Vite, no UI framework, no Tailwind (not justified for
-four static-shaped pages). Client-side "routing" is a `useState<Section>` in
+five static-shaped pages). Client-side "routing" is a `useState<Section>` in
 `App.tsx` rather than a router library — there is no deep-linking
-requirement in Phase 1 and adding `react-router` for four tabs would be the
-kind of unnecessary abstraction the project brief warns against.
+requirement and adding `react-router` for five tabs would be the kind of
+unnecessary abstraction the project brief warns against. It is styled as a
+financial-operations command center: a clean corporate-SaaS design system
+in `index.css` (CSS-variable tokens), not a generic CRUD dashboard.
 
 ```
 frontend/src/
   api/        types.ts (hand-mirrors backend Pydantic schemas), client.ts (fetch wrapper),
               useApiResource.ts (small load/error/success hook, no caching layer)
-  components/ Layout (shell + nav), StatusStates (loading/error/empty),
-              CaseDetailPanel (AI investigation + execution view — see below),
-              CaseTimeline (chronological audit events for one case)
-  pages/      OverviewPage, RecoveryCasesPage, EvaluationPage, AuditTrailPage
+  components/ AppShell (shell + nav + provider-mode pill), ui.tsx (Card/Badge/Button/... primitives),
+              AgentConsole (autonomous-agent panel + discover→diagnose→decide→act→observe pipeline),
+              ActivityFeed (live audit-event stream, lane-tagged AI / POLICY / EXEC / WEBHOOK),
+              PolicyLadder (AI recommendation → policy checks → ALLOW/BLOCK, for one case),
+              CaseDrawer (Payment / AI diagnosis / Policy / Execution / Verification / Timeline),
+              Timeline (stage-labelled chronological audit events), IngestPaymentModal, PolicyBadge
+  pages/      OverviewPage (Command Center), RecoveryCasesPage, PolicyDecisionsPage,
+              AuditTrailPage, EvaluationPage
 ```
 
 Empty states are explicit and real (`EmptyState` component) — the frontend
 never fabricates numbers when the API returns no data. `EvaluationPage`
-specifically renders the difference between "no evaluation has been run"
-and "here are real computed metrics." `OverviewPage` renders the
-simulated evaluation summary and the live `RecoverySummaryRead` as two
+renders the difference between "no evaluation has been run" and "here are
+real computed metrics." The Command Center keeps the live
+`RecoverySummaryRead` and the simulated evaluation summary as two
 separate, separately-labeled card groups — never combined into one figure
 (see docs/razorpay-integration.md "Simulated vs. real evaluation").
 
-`RecoveryCasesPage` rows are clickable, opening `CaseDetailPanel`: payment
-context, the AI diagnosis/recommendation (or "No diagnosis available yet"),
-and — rendered as a visually distinct, separately-labeled block — the
-policy engine's ALLOW/BLOCK decision. The recommendation and the
-authorization are never merged into one "approved" concept in the UI, on
-purpose (see docs/ai-safety.md). Below that, a "Recovery execution"
-section shows any Payment Link created for the case (short URL, amount
-paid vs. amount due) and, only when the case is `APPROVED`, an "Execute
-recovery" button — the frontend only requests execution; the backend
-independently re-verifies approval, policy, and amount before ever
-calling Razorpay (see docs/razorpay-integration.md). A `CaseTimeline`
-renders the full audit trail for the case chronologically at the bottom
-of the panel.
+The Command Center leads with `AgentConsole`: an agent-status label
+(running / idle / error), the cycle count, the last cycle's counts, and a
+five-stage pipeline whose per-stage state (pending / running / completed)
+is derived from recent audit events — plus a "Start recovery cycle" button
+that calls `POST /orchestrator/cycle` (respecting `ORCHESTRATOR_AUTO_EXECUTE`;
+a single operator-triggered cycle has no "stop", it runs to completion).
+`ActivityFeed` below it polls `/audit-events` and renders each event with a
+lane tag so AI reasoning, the policy decision, execution, and webhook
+verification are visually distinct.
+
+`RecoveryCasesPage`, `PolicyDecisionsPage`, and `AuditTrailPage` rows are
+clickable, opening `CaseDrawer`: six labelled sections — Payment, AI
+diagnosis, Policy decision, Execution, Verification, Audit timeline. The
+Policy decision section renders `PolicyLadder`: the AI's recommended action
+and confidence, then each deterministic check (`retry limit`, `amount
+ceiling`, `confidence`, `recovery window`, `contact cap`) against the real
+limits from `/system/info` with a ✓/✕, then the recorded ALLOW/BLOCK
+verdict from the case's `policy_evaluated` audit event — the verdict is
+shown, never recomputed in the browser as if it were authoritative. The
+recommendation and the authorization are never merged into one "approved"
+concept in the UI, on purpose (see docs/ai-safety.md). The Verification
+section shows the confirming webhook, and in demo mode says plainly that
+that webhook was simulated. The frontend only ever *requests* diagnosis
+and execution; the backend independently re-verifies approval, policy, and
+amount before any provider call (see docs/razorpay-integration.md).
+
+`/system/info` also drives the top-bar pill: **DEMO MODE — payment
+simulated** when no Razorpay Test Mode key is configured, or the real
+gateway mode when one is. The recovered-revenue figure is always a real
+measurement over real rows; in demo mode its payment confirmation was
+simulated, and the UI says so rather than hiding it.
 
 ## Evaluation package
 
@@ -233,7 +269,7 @@ evaluation/
   schemas/       Dataset/case/ground-truth Pydantic models (standalone, not backend enums)
   generators/    Six scenario generators, deterministic dataset builder, dev/held-out split
   baseline/      Non-AI rule-based reference strategy
-  ai_strategy/   Gemini-backed evaluation strategy (independent of backend/app/ai)
+  ai_strategy/   Groq-backed evaluation strategy (independent of backend/app/ai)
   metrics/       financial.py, decision.py, safety.py, operational.py, report.py
   datasets/generated/   git-ignored generated dataset JSON
   reports/              git-ignored generated report JSON (single-strategy)

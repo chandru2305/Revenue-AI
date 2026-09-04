@@ -11,6 +11,18 @@ from app.repositories.base import BaseRepository
 class PaymentRepository(BaseRepository[Payment]):
     model = Payment
 
+    async def get_by_provider_payment_id(self, provider_payment_id: str) -> Payment | None:
+        """Look up a payment by the provider's own id — the idempotency
+        handle for a re-delivered ingestion event. Returns the earliest
+        match if the id somehow appears more than once (it shouldn't)."""
+        stmt = (
+            select(Payment)
+            .where(Payment.provider_payment_id == provider_payment_id)
+            .order_by(Payment.created_at.asc())
+            .limit(1)
+        )
+        return (await self.session.execute(stmt)).scalars().first()
+
     async def list_failed_without_recovery_case(self, limit: int) -> list[Payment]:
         """Failed payments that have no `RecoveryCase` yet — the input to a
         discovery sweep. Oldest first, so the longest-leaking revenue is

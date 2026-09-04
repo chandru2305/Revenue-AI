@@ -94,39 +94,64 @@ It is intentionally not tuned to maximize its own metrics.
 `evaluation/generators/split.py::held_out_split` divides the dataset into
 development/held-out sets by hashing each case's `case_id` (SHA-256,
 deterministic, stable across dataset regenerations at a different `count`
-for the same seed) — default 20% held out. Both the baseline and a
-Gemini-backed strategy (`evaluation/ai_strategy/gemini_strategy.py`) are
-scored on the *same* held-out subset, computed via the exact same
+for the same seed) — default 20% held out. The baseline and the selected
+LLM strategy are scored on the *same* held-out subset, via the exact same
 `evaluation/metrics/*.py` functions used for the baseline-only report, so
 the two numbers are directly comparable.
 
 ```bash
 python -m evaluation.run_ai_evaluation \
-    --dataset evaluation/datasets/generated/dataset_500_seed42.json --limit 20
+    --dataset evaluation/datasets/generated/dataset_500_seed42.json --limit 30
 ```
 
-`--limit` caps how many held-out cases are actually sent to Gemini
-(default 20 — a small, controlled subset, not the full dataset, per the
-"don't make hundreds of uncontrolled API calls" requirement).
-`--rate-limit-delay` (default 1s) sleeps between calls. Every per-case
-Gemini failure (timeout, malformed output, ...) is scored as an explicit
-safe-fallback `ESCALATE` and counted in the report — never silently
-dropped, never presented as if the AI had produced a real answer. Without
-`GEMINI_API_KEY` set, the command still runs and reports real baseline
-numbers on the held-out subset, with the AI side explicitly marked
-`"status": "skipped_no_credentials"` — see docs/ai-architecture.md's
-"Known limitations" for what was and wasn't actually executed during
-Phase 2 development.
+`--limit` caps how many held-out cases are sent (default 20 — a small,
+controlled subset, per "don't make hundreds of uncontrolled API calls").
+`--rate-limit-delay` sleeps between calls. Every per-case failure
+(timeout, malformed output, quota) is scored as an explicit safe-fallback
+`ESCALATE`, counted, and tallied by reason in `ai.operational` — never
+silently dropped, never presented as a real answer. When provider
+failures dominate, the report's `ai.status` degrades
+(`degraded_majority_calls_failed`, `unusable_all_calls_failed`) and the
+CLI prints a warning above the table, so a contaminated run cannot be
+mistaken for a finding. Without the selected provider's key set, the AI
+side is marked `"status": "skipped_no_credentials"`.
 
-The comparison strategy (`ai_strategy/gemini_strategy.py`) is written
-independently of `backend/app/ai/prompts/diagnosis_v1.py` — similar in
-spirit (structured output, prefer escalate-on-uncertainty, no
-chain-of-thought), not the same prompt — consistent with `evaluation/`
-having zero import dependency on `backend/`. Reports go to
+Prompt text and output schema live in
+`evaluation/ai_strategy/shared.py`, separate from the provider call, so
+adding or swapping a provider keeps comparisons apples to apples. That
+shared prompt is written
+independently of `backend/app/ai/prompts/diagnosis_v1.py` — same spirit
+(structured output, escalate-on-uncertainty, no chain-of-thought), not
+the same text — consistent with `evaluation/` having zero import
+dependency on `backend/`. Reports go to
 `evaluation/reports/ai_comparisons/`, a separate directory from the
-single-strategy `evaluation/reports/`, specifically so the backend's
-`GET /api/v1/evaluation/summary` — which expects the single-strategy
-shape — never picks one up by accident.
+single-strategy `evaluation/reports/`, so the backend's
+`GET /api/v1/evaluation/summary` never picks one up by accident.
+
+### What the first clean run found (1 Sep 2026)
+
+Groq (`openai/gpt-oss-120b`) ran **30 held-out cases with 0 provider
+failures** — 30/30 real answers, ~1.3s mean latency:
+
+| Metric (n=30) | Baseline | Groq |
+|---|---|---|
+| Intervention accuracy | 0.87 | 0.47 |
+| Appropriate escalation rate | 0.50 | 0.25 |
+| Inappropriate intervention rate | 0.00 | 0.63 |
+| Policy violations | 5 | 11 |
+| Recovery rate (simulated) | 1.00 | 0.71 |
+
+**The LLM underperformed the deterministic baseline on every metric.**
+This is a real, reproducible result — but read it against this
+document's own "Known limitations" below: the dataset's ground truth was
+authored from the same heuristics the baseline implements, so "accuracy"
+measures agreement-with-our-rules, not real-world recovery. The baseline
+scores 0.87 against a rubric derived from itself; a model reasoning from
+first principles is penalised for every defensible disagreement. The eval
+prompt also withholds the numeric thresholds (retry cap 3, window 14d,
+contact cap 2) that *define* the ground truth. The harness is sound and
+the number is honest; what it cannot yet test is the messy-free-text case
+the LLM was added for, because `failure_reason` is a fixed enum.
 
 ## Metrics
 
@@ -203,7 +228,7 @@ overwriting in place, so historical runs aren't silently lost.
    to keep the two packages independently runnable. If backend policy
    defaults change, these must be updated by hand or they will silently
    drift — there is no automated check for this yet.
-5. The Gemini-backed evaluation strategy's prompt is written independently
+5. The Groq-backed evaluation strategy's prompt is written independently
    of the backend's — see docs/ai-architecture.md's "Known limitations" —
    and no real `run_ai_evaluation.py` numbers were generated during Phase 2
    development (no API key available in the build environment). The

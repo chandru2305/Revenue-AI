@@ -18,14 +18,25 @@ request and send it to them: a **Payment Link**
 (`POST /v1/payment_links`), which Razorpay hosts, can be sent by
 SMS/email, and produces its own new payment on completion.
 
-Because of this, Phase 3 implements exactly one recovery action end to
-end: `SEND_PAYMENT_LINK`. `RETRY_PAYMENT` remains a valid AI/policy
-recommendation (see `docs/recovery-state-machine.md`), but the executor
-does not implement it against a real provider — there is no Razorpay
-endpoint that does what its name implies. A case recommended for
-`RETRY_PAYMENT` is escalated by the executor
-(`_IMPLEMENTED_ACTIONS` in `execution_service.py`) rather than having a
-fabricated retry endpoint invented for it.
+Because of this, exactly one recovery action is implemented end to end:
+`SEND_PAYMENT_LINK`. `RETRY_PAYMENT` remains a valid AI/policy
+recommendation (see `docs/recovery-state-machine.md`), but no executor
+implements it against a real provider — there is no Razorpay endpoint
+that does what its name implies, and none is invented for it.
+
+The set of actions that *can* be executed is declared once, in the domain
+layer, as `EXECUTABLE_ACTIONS` (`app/domain/providers/base.py`). It is
+consulted in two places:
+
+- **`diagnosis_service._resolve_next_status`** — a case whose recommended
+  action isn't executable goes to `ESCALATED` rather than `APPROVED`,
+  even when policy said ALLOW. `APPROVED` means "ready to execute", so
+  approving such a case would advertise an Execute action that could only
+  ever fail. The transition records the real reason ("permitted by policy
+  but has no executor implementation"), which is a different kind of
+  human follow-up than a policy block.
+- **`execution_service`** — the same check again as defence in depth, for
+  a case approved under an older build or edited out of band.
 
 ## What was verified against current Razorpay documentation
 
@@ -174,14 +185,31 @@ Two independent mechanisms, for two independent concerns:
    `FAILED` structurally cannot execute again. No separate idempotency
    table was needed for this, matching the pattern already established
    for diagnosis in Phase 2.
-2. **Webhook delivery.** Razorpay's payload has no single top-level
-   delivery ID exposed consistently across event types, so
-   `ParsedWebhookEvent.dedup_key` is derived as
-   `f"{event_type}:{payment_link_id}:{payment_id}"` and stored, unique,
+2. **Webhook delivery.** `ParsedWebhookEvent.dedup_key` is stored, unique,
    in `ProcessedWebhookEvent`. A redelivered webhook (Razorpay retries on
    non-2xx, and operators may replay from the dashboard) is detected via
    that unique constraint and short-circuited to a `"duplicate"` result
    before any state change is attempted.
+
+   The key prefers Razorpay's **`X-Razorpay-Event-Id`** request header,
+   which is stable across redeliveries of the same event and is therefore
+   the canonical idempotency handle. A delivery arriving without that
+   header falls back to `f"{event_type}:{payment_link_id}:{payment_id}"` —
+   still sound in practice (a payment link reaches a given status once),
+   but strictly weaker, since two genuinely distinct events sharing all
+   three values would collide. See
+   `app.payments.webhooks.build_dedup_key`.
+
+   **Ordering is load-bearing.** The dedup row is inserted *first*, before
+   the case transition and the `recovered_amount` increment — see
+   `webhook_service._claim_event`. An earlier version claimed the event
+   last, which meant losing the insert race rolled back an already-applied
+   transition while still reporting `"processed"`: revenue integrity was
+   preserved only by the independent optimistic-lock guard, and the return
+   value was wrong either way. Claiming first bounds the rollback to the
+   single INSERT. A claim that is later abandoned (an exception rolls the
+   whole transaction back) is also correct — the event genuinely wasn't
+   processed, so Razorpay's redelivery retries it.
 
 `RecoveryAttempt.idempotency_key` (set to the same UUID used as the
 Payment Link's `reference_id`) exists for a third purpose: reconciliation
@@ -380,16 +408,21 @@ labeled by which one actually produced the rows behind it:
    one real Test Mode Payment Link to demonstrate the integration
    actually works end to end against the live API, without consuming the
    Test Mode Payment Link quota at scale.
-3. **Demo batch** (`backend/scripts/seed_demo_batch.py`, same `GET
-   /api/v1/evaluation/recovery-summary` endpoint as #2 — it's a pure
+3. **Recovery batch** (`backend/scripts/seed_demo_batch.py`,
+   `POST /api/v1/demo/seed-batch`, same `GET
+   /api/v1/evaluation/recovery-summary` endpoint as #2 — a pure
    aggregation over whatever rows exist, with no way to tag their
    provenance): runs 30 cases through the exact same production pipeline
    as #2 — `diagnose_recovery_case` → `execute_recovery_case` → webhook
-   processing → `compute_recovery_summary` — substituting only
-   `FakeAIProvider`/`FakePaymentProvider` for Gemini/Razorpay. Exists
-   because #2 requires live credentials that were not available in any
-   build environment; without it, "measured money recovered across a
-   batch" would be undemonstrable in this repository as cloned — every
+   processing → `compute_recovery_summary`. **AI diagnosis is live**
+   (the endpoint/CLI call `get_ai_service`; tests inject a scripted
+   stand-in). Only `create_payment_link` and the confirmation webhook are
+   served by `FakePaymentProvider` + hand-built payloads, because Razorpay
+   Test Mode is not configured — that is the sole substitution, and the
+   only way to reach `RECOVERED` without a live gateway. Exists
+   because #2 requires live Razorpay credentials that were not available;
+   without it, "measured money recovered across a batch" would be
+   undemonstrable in this repository as cloned — every
    figure on a fresh, credential-less database is honestly zero. The
    batch is deliberately mixed (recovered, expired-unpaid, policy-stopped,
    AI/policy-escalated) rather than 100% success, specifically so it also
@@ -397,7 +430,7 @@ labeled by which one actually produced the rows behind it:
    **Never** present a demo-batch-populated `recovery-summary` response
    as a real Razorpay result — state plainly which one produced it.
 
-The frontend's Overview page renders the real/demo `recovery-summary`
+The frontend's Command Center page renders the real/demo `recovery-summary`
 metrics alongside the simulated evaluation summary, explicitly labeled,
 side by side — never averaged or summed together. It cannot itself tell
 #2 and #3 apart (see above) — say which one you ran when presenting it.
@@ -409,12 +442,13 @@ in the environment this phase was built in. `backend/tests/integration/razorpay_
 exists and is ready to run given `RAZORPAY_KEY_ID`/`RAZORPAY_KEY_SECRET`
 Test Mode credentials, but no such credentials were available, so no real
 Payment Link was created and no real recovered-revenue figure exists from
-this build. Every "recovered revenue" number produced during this phase
-came from `FakePaymentProvider`-backed automated tests
-(`backend/tests/test_execution_workflow.py`,
-`test_webhook_workflow.py`) and, at batch scale, from the demo batch
-(`backend/scripts/seed_demo_batch.py`, `backend/tests/test_demo_batch.py`)
-— every one reported as such, never presented as a Razorpay result.
+this build. Every "recovered revenue" number came from
+`FakePaymentProvider`-backed automated tests
+(`backend/tests/test_execution_workflow.py`, `test_webhook_workflow.py`)
+and, at batch scale, from the recovery batch
+(`backend/scripts/seed_demo_batch.py`) — whose **AI diagnosis is live**
+but whose payment confirmation is simulated, reported as such in the
+response provenance and CLI output, never presented as a Razorpay result.
 
 ## Limitations
 

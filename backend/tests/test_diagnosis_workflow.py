@@ -78,10 +78,13 @@ async def _audit_event_types(db_session, entity_id: uuid.UUID) -> list[str]:
 async def test_successful_diagnosis_is_approved(client, db_session):
     case = await _seed_case(db_session)
     recommendation = RecoveryRecommendation(
-        diagnosis_category=DiagnosisCategory.TEMPORARY_FAILURE,
+        diagnosis_category=DiagnosisCategory.CUSTOMER_SIDE_FAILURE,
         recovery_confidence=0.9,
-        recommended_action=RecoveryAction.RETRY_PAYMENT,
-        decision_explanation="Transient failure, first attempt.",
+        # Must be an EXECUTABLE_ACTION: APPROVED means "ready to execute",
+        # so only an action the executor can actually perform belongs on
+        # this path. See test_permitted_but_unexecutable_action_escalates.
+        recommended_action=RecoveryAction.SEND_PAYMENT_LINK,
+        decision_explanation="Card declined; a payment link lets them retry.",
     )
     _override_ai_service(FakeAIProvider(recommendation=recommendation))
 
@@ -92,8 +95,84 @@ async def test_successful_diagnosis_is_approved(client, db_session):
     assert body["case_status"] == RecoveryCaseStatus.APPROVED.value
     assert body["decision_source"] == DecisionSource.AI.value
     assert body["policy_decision"] == PolicyDecisionType.ALLOW.value
-    assert body["recommended_action"] == RecoveryAction.RETRY_PAYMENT.value
+    assert body["recommended_action"] == RecoveryAction.SEND_PAYMENT_LINK.value
     assert body["correlation_id"]
+
+
+@pytest.mark.asyncio
+async def test_permitted_but_unexecutable_action_escalates_instead_of_approving(client, db_session):
+    """RETRY_PAYMENT passes every policy rule, but no executor implements
+    it (Razorpay has no generic retry endpoint). Approving such a case
+    would advertise an Execute action that could only ever fail, so it
+    goes to human review at diagnosis time instead."""
+    case = await _seed_case(db_session)
+    recommendation = RecoveryRecommendation(
+        diagnosis_category=DiagnosisCategory.TEMPORARY_FAILURE,
+        recovery_confidence=0.95,
+        recommended_action=RecoveryAction.RETRY_PAYMENT,
+        decision_explanation="Transient failure, first attempt.",
+    )
+    _override_ai_service(FakeAIProvider(recommendation=recommendation))
+
+    response = await client.post(f"/api/v1/recovery-cases/{case.id}/diagnose")
+
+    assert response.status_code == 200
+    body = response.json()
+    # Policy said ALLOW — this is not a policy block, it's a capability gap.
+    assert body["policy_decision"] == PolicyDecisionType.ALLOW.value
+    assert body["policy_reason_codes"] == []
+    assert body["case_status"] == RecoveryCaseStatus.ESCALATED.value
+    assert body["recommended_action"] == RecoveryAction.RETRY_PAYMENT.value
+
+
+@pytest.mark.asyncio
+async def test_unexecutable_action_records_why_it_escalated(client, db_session):
+    """The audit trail must distinguish 'policy blocked this' from
+    'nothing can execute this' — they need different human follow-up."""
+    case = await _seed_case(db_session)
+    _override_ai_service(
+        FakeAIProvider(
+            recommendation=RecoveryRecommendation(
+                diagnosis_category=DiagnosisCategory.TEMPORARY_FAILURE,
+                recovery_confidence=0.95,
+                recommended_action=RecoveryAction.RETRY_PAYMENT,
+                decision_explanation="Transient failure.",
+            )
+        )
+    )
+
+    await client.post(f"/api/v1/recovery-cases/{case.id}/diagnose")
+
+    stmt = (
+        select(AuditEvent)
+        .where(AuditEvent.entity_id == case.id)
+        .where(AuditEvent.event_type == "recovery_case_status_changed")
+        .order_by(AuditEvent.created_at)
+    )
+    rows = (await db_session.execute(stmt)).scalars().all()
+    final = rows[-1]
+    assert final.payload["to_status"] == RecoveryCaseStatus.ESCALATED.value
+    assert "no executor implementation" in (final.payload["reason"] or "")
+
+
+@pytest.mark.asyncio
+async def test_send_reminder_is_also_not_approvable_yet(client, db_session):
+    """Guards the other action whose provider method exists but isn't
+    wired into the execution flow."""
+    case = await _seed_case(db_session)
+    _override_ai_service(
+        FakeAIProvider(
+            recommendation=RecoveryRecommendation(
+                diagnosis_category=DiagnosisCategory.CUSTOMER_SIDE_FAILURE,
+                recovery_confidence=0.95,
+                recommended_action=RecoveryAction.SEND_REMINDER,
+                decision_explanation="A nudge should be enough.",
+            )
+        )
+    )
+
+    response = await client.post(f"/api/v1/recovery-cases/{case.id}/diagnose")
+    assert response.json()["case_status"] == RecoveryCaseStatus.ESCALATED.value
 
 
 @pytest.mark.asyncio

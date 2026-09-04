@@ -1,7 +1,7 @@
 import { Fragment, useMemo, useState } from "react";
 import { api } from "../api/client";
 import { useApiResource } from "../api/useApiResource";
-import type { ActorType, AuditEventRead } from "../api/types";
+import type { ActorType, AuditEventRead, SystemInfo } from "../api/types";
 import { formatDateTime, formatRelative, humanize } from "../lib/format";
 import { ACTOR_TYPES, actorTone, ENTITY_TYPES } from "../lib/labels";
 import { CaseDrawer } from "../components/CaseDrawer";
@@ -9,7 +9,7 @@ import { Badge, Button, Copyable, EmptyState, ErrorState, JsonBlock, LoadingStat
 
 const PAGE_SIZE = 50;
 
-export function AuditTrailPage() {
+export function AuditTrailPage({ system }: { system?: SystemInfo | null }) {
   const [entityType, setEntityType] = useState("");
   const [eventType, setEventType] = useState("");
   const [correlationId, setCorrelationId] = useState("");
@@ -201,7 +201,14 @@ export function AuditTrailPage() {
         </div>
       )}
 
-      {openCase && <CaseDrawer caseId={openCase} onClose={() => setOpenCase(null)} onMutated={refetch} />}
+      {openCase && (
+        <CaseDrawer
+          caseId={openCase}
+          system={system}
+          onClose={() => setOpenCase(null)}
+          onMutated={refetch}
+        />
+      )}
     </>
   );
 }

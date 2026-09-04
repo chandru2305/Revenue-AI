@@ -70,6 +70,7 @@ export function Button({
   size,
   disabled,
   type = "button",
+  title,
 }: {
   children: ReactNode;
   onClick?: () => void;
@@ -77,6 +78,7 @@ export function Button({
   size?: "sm";
   disabled?: boolean;
   type?: "button" | "submit";
+  title?: string;
 }) {
   const cls = [
     "btn",
@@ -87,7 +89,7 @@ export function Button({
     .filter(Boolean)
     .join(" ");
   return (
-    <button type={type} className={cls} onClick={onClick} disabled={disabled}>
+    <button type={type} className={cls} onClick={onClick} disabled={disabled} title={title}>
       {children}
     </button>
   );

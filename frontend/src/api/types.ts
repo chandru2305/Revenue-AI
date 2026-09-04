@@ -292,6 +292,8 @@ export interface PaymentIngestResponse {
   recovery_case_id: string | null;
   recovery_case_status: RecoveryCaseStatus | null;
   correlation_id: string;
+  /** True when this matched an existing payment by provider_payment_id and no new record was created. */
+  deduplicated: boolean;
 }
 
 export interface RecoveryCaseCreatedResponse {
@@ -303,6 +305,43 @@ export interface RecoveryCaseCreatedResponse {
   correlation_id: string;
 }
 
+export interface CycleCaseOutcome {
+  recovery_case_id: string;
+  final_status: RecoveryCaseStatus;
+  diagnosed: boolean;
+  executed: boolean;
+  withheld_reason: string | null;
+  error: string | null;
+}
+
+export interface RecoveryCycleReport {
+  cycle_id: string;
+  correlation_id: string;
+  started_at: string;
+  finished_at: string;
+  duration_seconds: number;
+  auto_execute: boolean;
+  cases_discovered: number;
+  cases_diagnosed: number;
+  cases_executed: number;
+  cases_failed: number;
+  approved: number;
+  stopped: number;
+  escalated: number;
+  recovered: number;
+  outcomes: CycleCaseOutcome[];
+}
+
+export interface DemoBatchResponse {
+  correlation_id: string;
+  cases_processed: number;
+  final_status_counts: Record<string, number>;
+  /** Model that produced the diagnoses (live provider's model, or a fallback label). */
+  ai_model: string;
+  summary: RecoverySummaryRead;
+  provenance: string;
+}
+
 export interface DiscoveryReport {
   scanned: number;
   created: number;
@@ -310,4 +349,59 @@ export interface DiscoveryReport {
   case_ids: string[];
   generated_at: string;
   correlation_id: string;
+}
+
+// ---- Autonomous agent status (GET /orchestrator/status) ----
+
+export interface LastCycleSummary {
+  completed_at: string;
+  correlation_id: string | null;
+  auto_execute: boolean;
+  cases_discovered: number;
+  cases_diagnosed: number;
+  cases_executed: number;
+  cases_failed: number;
+  approved: number;
+  stopped: number;
+  escalated: number;
+  duration_seconds: number;
+}
+
+export interface OrchestratorStatus {
+  enabled: boolean;
+  running: boolean;
+  errored: boolean;
+  auto_execute: boolean;
+  interval_seconds: number;
+  cycles_completed: number;
+  last_cycle: LastCycleSummary | null;
+  recent_ai_diagnoses: number;
+  average_ai_latency_ms: number | null;
+  /** "running" | "idle" | "error" */
+  agent_state: string;
+}
+
+// ---- Deployment wiring (GET /system/info) ----
+
+export interface PolicyLimits {
+  max_retry_count: number;
+  max_recovery_window_days: number;
+  max_customer_contacts: number;
+  min_confidence_threshold: number;
+  high_value_amount_threshold: number;
+  high_value_min_confidence_threshold: number;
+  max_recovery_amount: number;
+}
+
+export interface SystemInfo {
+  app_env: string;
+  demo_mode: boolean;
+  payment_provider: string;
+  payment_provider_mode: string;
+  ai_provider: string;
+  ai_model: string;
+  orchestrator_enabled: boolean;
+  orchestrator_auto_execute: boolean;
+  auth_enforced: boolean;
+  policy: PolicyLimits;
 }

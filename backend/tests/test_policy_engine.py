@@ -1,5 +1,6 @@
 from app.domain.enums import PolicyDecisionType, PolicyReasonCode, RecoveryAction, RecoveryCaseStatus
 from app.domain.policy import PolicyConfig, PolicyEvaluationInput, evaluate_policy
+from app.services.diagnosis_service import _HARD_STOP_REASON_CODES
 
 CONFIG = PolicyConfig()
 
@@ -84,6 +85,61 @@ def test_blocks_action_not_eligible_for_status():
 def test_blocks_non_positive_amount():
     decision = evaluate_policy(_input(amount=0), CONFIG)
     assert PolicyReasonCode.AMOUNT_OUT_OF_BOUNDS in decision.reason_codes
+
+
+def test_blocks_amount_above_the_ceiling():
+    """A corrupted/mis-ingested amount must never reach a provider on
+    confidence alone — high confidence is not a substitute for a bound."""
+    decision = evaluate_policy(
+        _input(amount=CONFIG.max_recovery_amount + 1, recovery_confidence=1.0), CONFIG
+    )
+    assert decision.decision == PolicyDecisionType.BLOCK
+    assert PolicyReasonCode.AMOUNT_OUT_OF_BOUNDS in decision.reason_codes
+
+
+def test_allows_amount_exactly_at_the_ceiling():
+    decision = evaluate_policy(
+        _input(
+            proposed_action=RecoveryAction.SEND_PAYMENT_LINK,
+            amount=CONFIG.max_recovery_amount,
+            recovery_confidence=1.0,
+        ),
+        CONFIG,
+    )
+    assert PolicyReasonCode.AMOUNT_OUT_OF_BOUNDS not in decision.reason_codes
+
+
+def test_amount_ceiling_is_configurable():
+    tight = PolicyConfig(max_recovery_amount=5_000)
+    assert (
+        PolicyReasonCode.AMOUNT_OUT_OF_BOUNDS
+        in evaluate_policy(_input(amount=5_001), tight).reason_codes
+    )
+    assert (
+        PolicyReasonCode.AMOUNT_OUT_OF_BOUNDS
+        not in evaluate_policy(_input(amount=5_000), tight).reason_codes
+    )
+
+
+def test_amount_bound_applies_to_every_action_and_is_a_hard_stop():
+    """Unlike the recovery-window and confidence rules, the amount bound is
+    amount-scoped, not action-scoped: it fires for STOP/ESCALATE too. That
+    is safe rather than a trap, because AMOUNT_OUT_OF_BOUNDS is classified
+    as a hard-stop reason (see diagnosis_service._HARD_STOP_REASON_CODES),
+    so such a case lands in STOPPED — a terminal state — instead of being
+    left un-actionable."""
+    for action in (RecoveryAction.STOP, RecoveryAction.ESCALATE):
+        decision = evaluate_policy(
+            _input(
+                case_status=RecoveryCaseStatus.FAILED,
+                proposed_action=action,
+                amount=CONFIG.max_recovery_amount * 100,
+            ),
+            CONFIG,
+        )
+        assert PolicyReasonCode.AMOUNT_OUT_OF_BOUNDS in decision.reason_codes
+
+    assert PolicyReasonCode.AMOUNT_OUT_OF_BOUNDS in _HARD_STOP_REASON_CODES
 
 
 def test_stop_and_escalate_are_never_blocked_by_expired_recovery_window():

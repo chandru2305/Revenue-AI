@@ -1,2 +1,2 @@
 pydantic==2.12.5
-google-genai==2.20.0
+groq==0.33.0

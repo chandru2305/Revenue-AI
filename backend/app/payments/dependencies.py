@@ -44,6 +44,15 @@ class _UnconfiguredPaymentProvider(PaymentProvider):
 
 @lru_cache
 def get_payment_provider() -> PaymentProvider:
+    """Cached deliberately: `RazorpayPaymentProvider` owns a pooled
+    `httpx.AsyncClient`, so building a fresh one per request would leak
+    connections. The trade-off is that a credential change needs a process
+    restart — acceptable, since credentials come from the environment and
+    a restart is how you change those anyway.
+
+    The cache is what makes `close_payment_provider` below correct: there
+    is at most one provider instance to close.
+    """
     settings = get_settings()
     if not settings.razorpay_key_id or not settings.razorpay_key_secret:
         return _UnconfiguredPaymentProvider()
@@ -54,3 +63,16 @@ def get_payment_provider() -> PaymentProvider:
         mode=settings.razorpay_mode,
         timeout_seconds=settings.razorpay_request_timeout_seconds,
     )
+
+
+async def close_payment_provider() -> None:
+    """Release the cached provider's resources on application shutdown.
+
+    Only closes a provider that was actually constructed — inspecting the
+    lru_cache rather than calling `get_payment_provider()`, which would
+    build one just to close it.
+    """
+    if get_payment_provider.cache_info().currsize == 0:
+        return
+    await get_payment_provider().aclose()
+    get_payment_provider.cache_clear()

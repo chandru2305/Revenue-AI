@@ -127,7 +127,48 @@ async def ingest_payment(
     session: AsyncSession, request: PaymentIngestRequest, *, correlation_id: str
 ) -> PaymentIngestResponse:
     """Record a provider-reported payment and (for failed payments, when
-    `auto_create_case` is set) open its recovery case in one call."""
+    `auto_create_case` is set) open its recovery case in one call.
+
+    Idempotency: a real payment provider re-delivers events. When the
+    caller supplies the provider's own `provider_payment_id`, a repeat
+    ingestion returns the *original* payment (and its case) instead of
+    creating a duplicate — the same contract the webhook path enforces via
+    `ProcessedWebhookEvent`. With no `provider_payment_id` there is nothing
+    to dedup on, and each call is treated as a distinct report.
+    """
+    payment_repo = PaymentRepository(session)
+
+    if request.provider_payment_id:
+        existing_payment = await payment_repo.get_by_provider_payment_id(
+            request.provider_payment_id
+        )
+        if existing_payment is not None:
+            existing_case = (
+                await session.execute(
+                    select(RecoveryCase).where(RecoveryCase.payment_id == existing_payment.id)
+                )
+            ).scalar_one_or_none()
+            await audit_service.record_event(
+                session,
+                entity_type="payment",
+                entity_id=existing_payment.id,
+                event_type="payment_ingest_deduplicated",
+                actor_type=ActorType.SYSTEM,
+                payload={"provider_payment_id": request.provider_payment_id},
+                correlation_id=correlation_id,
+            )
+            await session.commit()
+            return PaymentIngestResponse(
+                payment_id=existing_payment.id,
+                customer_id=existing_payment.customer_id,
+                recovery_case_id=existing_case.id if existing_case is not None else None,
+                recovery_case_status=(
+                    RecoveryCaseStatus(existing_case.status) if existing_case is not None else None
+                ),
+                correlation_id=correlation_id,
+                deduplicated=True,
+            )
+
     customer = await _find_or_create_customer(session, request.customer_reference)
 
     customer.total_payments_count += 1

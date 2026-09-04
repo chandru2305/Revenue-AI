@@ -1,18 +1,45 @@
 import type { ReactNode } from "react";
+import type { SystemInfo } from "../api/types";
 import { SECTION_CRUMB, SECTION_GROUPS, type Section } from "./sections";
 
 type ApiStatus = "ok" | "degraded" | "unknown";
+
+function ProviderPill({ system }: { system: SystemInfo | null }) {
+  if (!system) return <span className="env-pill">…</span>;
+  if (system.demo_mode) {
+    return (
+      <span
+        className="mode-pill mode-pill--demo"
+        title="Payment confirmation is simulated (no Razorpay Test Mode key). Orchestration, policy enforcement, webhook processing, and audit logic use the real application pipeline."
+      >
+        <span className="mode-pill__dot" />
+        Demo mode — payment simulated
+      </span>
+    );
+  }
+  return (
+    <span
+      className="mode-pill mode-pill--live"
+      title={`Razorpay ${system.payment_provider_mode} mode`}
+    >
+      <span className="mode-pill__dot" />
+      Razorpay {system.payment_provider_mode}
+    </span>
+  );
+}
 
 export function AppShell({
   active,
   onSelect,
   apiStatus,
+  system,
   actions,
   children,
 }: {
   active: Section;
   onSelect: (s: Section) => void;
   apiStatus: ApiStatus;
+  system?: SystemInfo | null;
   actions?: ReactNode;
   children: ReactNode;
 }) {
@@ -23,7 +50,7 @@ export function AppShell({
           <span className="sidebar__mark">R</span>
           <span>
             <span className="sidebar__name">RecoverAI</span>
-            <span className="sidebar__sub">Revenue recovery control</span>
+            <span className="sidebar__sub">Autonomous recovery agent</span>
           </span>
         </div>
 
@@ -45,7 +72,10 @@ export function AppShell({
         ))}
 
         <div className="sidebar__foot">
-          AI reasons · deterministic systems enforce · webhooks confirm · every step audited.
+          <span className="sidebar__principle">
+            <b>AI reasons.</b> Policy decides. The agent acts. Webhooks verify.
+          </span>
+          Every step is recorded in an append-only audit trail.
         </div>
       </nav>
 
@@ -57,7 +87,7 @@ export function AppShell({
           </div>
           <div className="topbar__right">
             {actions}
-            <span className="env-pill">Test Mode</span>
+            <ProviderPill system={system ?? null} />
             <span className={`api-status api-status--${apiStatus}`}>
               <span className="api-status__dot" />
               API {apiStatus}

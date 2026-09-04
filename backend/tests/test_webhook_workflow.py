@@ -241,6 +241,106 @@ async def test_unmatched_payment_link_is_ignored_not_an_error(client, db_session
 
 
 @pytest.mark.asyncio
+async def test_redelivery_with_the_same_event_id_is_a_duplicate_despite_a_changed_payload(
+    client, db_session
+):
+    """Razorpay's X-Razorpay-Event-Id is stable across redeliveries and is
+    the canonical idempotency handle. Two deliveries carrying it must
+    dedup on it, even if the payload body differs between them."""
+    case, _attempt, payment_request = await _seed_executing_case(db_session)
+    headers_extra = {"x-razorpay-event-id": "evt_stable_id_123"}
+
+    first_body = json.dumps(
+        _payment_link_event(
+            "payment_link.paid", payment_link_id=payment_request.provider_reference, status="paid",
+            amount_paid=15_000,
+        )
+    ).encode()
+    first = await client.post(
+        "/api/v1/webhooks/razorpay",
+        content=first_body,
+        headers={"x-razorpay-signature": _sign(first_body), **headers_extra},
+    )
+    assert first.json()["status"] == "processed"
+
+    # Same event id, different payment_id in the body — under the old
+    # payload-derived key this produced a *different* dedup key and would
+    # have been reprocessed.
+    second_payload = _payment_link_event(
+        "payment_link.paid", payment_link_id=payment_request.provider_reference, status="paid",
+        amount_paid=15_000,
+    )
+    second_payload["payload"]["payment"]["entity"]["id"] = "pay_different_id"
+    second_body = json.dumps(second_payload).encode()
+    second = await client.post(
+        "/api/v1/webhooks/razorpay",
+        content=second_body,
+        headers={"x-razorpay-signature": _sign(second_body), **headers_extra},
+    )
+
+    assert second.json()["status"] == "duplicate"
+    await db_session.refresh(case)
+    assert case.recovered_amount == 15_000  # not double-counted
+
+
+@pytest.mark.asyncio
+async def test_a_duplicate_delivery_mutates_nothing(client, db_session):
+    """The claim-first ordering means a duplicate short-circuits before any
+    state change: no extra audit rows, no attempt/payment-request edits."""
+    from app.models.audit_event import AuditEvent
+
+    case, _attempt, payment_request = await _seed_executing_case(db_session)
+    body = json.dumps(
+        _payment_link_event(
+            "payment_link.expired", payment_link_id=payment_request.provider_reference,
+            status="expired", amount_paid=0,
+        )
+    ).encode()
+    signature = _sign(body)
+
+    await client.post(
+        "/api/v1/webhooks/razorpay", content=body, headers={"x-razorpay-signature": signature}
+    )
+    audit_after_first = len((await db_session.execute(select(AuditEvent))).scalars().all())
+
+    second = await client.post(
+        "/api/v1/webhooks/razorpay", content=body, headers={"x-razorpay-signature": signature}
+    )
+
+    assert second.json()["status"] == "duplicate"
+    audit_after_second = len((await db_session.execute(select(AuditEvent))).scalars().all())
+    assert audit_after_second == audit_after_first
+
+    await db_session.refresh(case)
+    assert case.status == RecoveryCaseStatus.FAILED  # from the first delivery only
+
+
+@pytest.mark.asyncio
+async def test_ignored_event_is_still_claimed_so_it_is_not_reprocessed(client, db_session):
+    """An event we deliberately ignore (unrecognized link) must still be
+    recorded — otherwise every redelivery re-walks the same dead end."""
+    body = json.dumps(
+        _payment_link_event(
+            "payment_link.paid", payment_link_id="plink_never_created_by_us", status="paid", amount_paid=100
+        )
+    ).encode()
+    signature = _sign(body)
+
+    first = await client.post(
+        "/api/v1/webhooks/razorpay", content=body, headers={"x-razorpay-signature": signature}
+    )
+    assert first.json()["status"] == "ignored"
+
+    second = await client.post(
+        "/api/v1/webhooks/razorpay", content=body, headers={"x-razorpay-signature": signature}
+    )
+    assert second.json()["status"] == "duplicate"
+
+    rows = (await db_session.execute(select(ProcessedWebhookEvent))).scalars().all()
+    assert len(rows) == 1
+
+
+@pytest.mark.asyncio
 async def test_webhook_creates_exactly_one_dedup_record(client, db_session):
     case, _attempt, payment_request = await _seed_executing_case(db_session)
     body = json.dumps(

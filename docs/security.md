@@ -2,13 +2,15 @@
 
 ## Threat model
 
-As of Phase 3, there is still no end-user authentication surface (the
-frontend is an internal-facing dashboard), but there are now two outbound
-external calls: the Gemini API (Phase 2) and, new in Phase 3, the
+The API is gated by a shared API key (see "API authentication" below);
+there is still no *per-user* authentication surface, since the frontend is
+an internal-facing operator dashboard with no notion of user identity.
+There are two outbound
+external calls: the Groq API (Phase 2) and, new in Phase 3, the
 Razorpay Test Mode API — plus one new *inbound* surface, the Razorpay
 webhook endpoint, which accepts unauthenticated-until-verified requests
 from the public internet. The main risks at this stage are: leaking
-secrets (`GEMINI_API_KEY`, and now `RAZORPAY_KEY_SECRET`/
+secrets (`GROQ_API_KEY`, and now `RAZORPAY_KEY_SECRET`/
 `RAZORPAY_WEBHOOK_SECRET`), prompt injection through payment/customer
 data reaching the AI, an AI layer that could bypass deterministic
 controls, a forged or replayed webhook forcing a case to `RECOVERED`
@@ -32,8 +34,8 @@ This is the core design principle of the whole project (see the root
 - `backend/app/domain/state_machine.py` is the only place that defines legal
   recovery-case status transitions. Services must call `validate_transition`
   before persisting a status change.
-- **As of Phase 2, an AI/LLM integration exists** (`backend/app/ai/`, Gemini
-  via `google-genai`). It is permitted to populate only *recommendation*
+- **An AI/LLM integration exists** (`backend/app/ai/`, Groq via the
+  `groq` SDK). It is permitted to populate only *recommendation*
   fields (`recommended_action`, `recovery_confidence`,
   `diagnosis_category`/`diagnosis_notes`) via a schema-validated
   `RecoveryRecommendation` — never a policy decision, a state transition, or
@@ -64,7 +66,7 @@ This is the core design principle of the whole project (see the root
   construct unless `RAZORPAY_MODE == "test"`
   (`RazorpayModeError`, not bypassable via any constructor argument);
   Live Mode credentials must never be placed in this repo or its `.env`
-  files. Like `GEMINI_API_KEY`, reading these is fully optional at
+  files. Like `GROQ_API_KEY`, reading these is fully optional at
   runtime: with no key_id/secret configured,
   `app/payments/dependencies.py::get_payment_provider()` returns a
   stand-in whose every method raises an auth error, which
@@ -77,8 +79,8 @@ This is the core design principle of the whole project (see the root
   accepting unverified events. See docs/razorpay-integration.md for full
   detail, including exactly what was checked against Razorpay's current
   API documentation before any of this was implemented.
-- `GEMINI_API_KEY` is used starting Phase 2, but reading it is fully
-  optional at runtime: `GeminiProvider` is only constructed if the key is
+- `GROQ_API_KEY` is used starting Phase 2, but reading it is fully
+  optional at runtime: `GroqProvider` is only constructed if the key is
   non-empty (`app/ai/dependencies.py`). An empty key does not crash the
   app or fail requests — it resolves to a stand-in provider that always
   raises an auth error, which `AIRecommendationService` already turns into
@@ -133,9 +135,63 @@ security model rests on signature verification, not a bearer token:
   the payload could otherwise imply.
 - Redelivered/replayed events are deduplicated (`ProcessedWebhookEvent`,
   unique `dedup_key`) before any state change, so a replay cannot double-
-  count recovered revenue or re-trigger side effects.
+  count recovered revenue or re-trigger side effects. The dedup key
+  prefers Razorpay's `X-Razorpay-Event-Id` header — stable across
+  redeliveries — over a key derived from payload contents, and the claim
+  is written *first* so a lost race can never roll back a partially
+  applied transition.
 
 Full detail: docs/razorpay-integration.md "Webhook handling."
+
+## API authentication
+
+Every `/api/v1` endpoint requires a shared key in an `X-API-Key` header,
+compared in constant time (`secrets.compare_digest`). A missing key and a
+wrong key produce byte-identical `401` responses, so a caller learns
+nothing about which it was.
+
+Three configuration postures, deliberately mirroring the rest of the
+codebase's fail-safe/fail-loud split:
+
+| `API_KEY` | `APP_ENV` | Behaviour |
+|---|---|---|
+| set | any | Enforced on every `/api/v1` route. |
+| empty | `development` / `test` | **Not enforced**, with a startup warning. Keeps local dev and `make up` zero-config, the same way an unset `GROQ_API_KEY` degrades to a safe fallback. |
+| empty | `production` | **Refuses to start** (`InsecureConfigurationError`). Silently serving an unauthenticated API in production is the one outcome worth failing loudly over — the same posture as the `RAZORPAY_MODE` guard. |
+
+Two endpoints are deliberately exempt, and neither is an oversight:
+
+- `GET /health` — an infrastructure probe (load balancers, uptime checks).
+  Requiring credentials for a liveness check would be counterproductive,
+  and it exposes nothing but `{"status", "checks"}`.
+- `POST /api/v1/webhooks/razorpay` — Razorpay cannot send our key. It
+  authenticates every request by HMAC-SHA256 over the raw body instead,
+  which is a *stronger* guarantee than a shared bearer key: it proves the
+  payload is untampered, not merely that the caller knows a secret. See
+  "Webhook handling" above.
+
+**The frontend's copy of the key is not a secret.** `VITE_API_KEY` is
+compiled into the JavaScript bundle at build time and is readable by
+anyone who opens browser devtools. It gates access to a *deployment*
+("can this browser reach this API at all"); it does not identify or
+authorize a person. Treat it as you would a public client ID, rotate it
+freely, and do not reuse it anywhere it would function as a real
+credential. Anything requiring genuine per-user authorization needs the
+identity layer listed under "Explicitly deferred" below.
+
+Implementation: `app/core/auth.py`, wired in `app/api/v1/router.py`.
+Tests: `backend/tests/test_api_auth.py`.
+
+## Request correlation IDs
+
+An inbound `X-Correlation-Id` is caller-supplied, is written into every
+structured log line for that request, and is echoed back in the response.
+It is therefore constrained rather than trusted: at most 128 characters,
+and `[A-Za-z0-9._:-]` only. Anything else is replaced with a generated
+UUID rather than rejected — a malformed trace header shouldn't fail an
+otherwise valid request. This closes a log-forging vector (a newline in
+the header would otherwise let a caller inject a fabricated log line).
+See `app.main._safe_correlation_id` and `tests/test_app_lifecycle.py`.
 
 ## Concurrency
 
@@ -186,10 +242,12 @@ Full detail in docs/ai-safety.md; summary here for completeness:
 
 ## Explicitly deferred to a later phase
 
-- **Authentication/authorization.** Phase 1's API has no auth layer — it is
-  not intended to be internet-facing as shipped. This must be added before
-  any deployment beyond local development, and is called out here so it
-  isn't mistaken for an oversight.
+- **Per-user authentication and authorization.** A shared API key now
+  gates the API (see "API authentication" above), but there are still no
+  users, roles, or per-actor permissions — every valid key holder can do
+  everything. Adding real identity is a larger design decision than this
+  codebase currently needs; it is called out here so the shared key isn't
+  mistaken for more than it is.
 - **Rate limiting / abuse protection.** Including on `POST
   .../diagnose` and, new in Phase 3, `POST .../execute` and
   `POST /webhooks/razorpay` — nothing currently stops a caller from

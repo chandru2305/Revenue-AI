@@ -103,6 +103,65 @@ async def test_ingest_reuses_customer_by_external_reference(client, db_session):
 
 
 @pytest.mark.asyncio
+async def test_repeat_ingest_with_same_provider_payment_id_is_deduplicated(client, db_session):
+    """A real provider re-delivers events. When the caller supplies the
+    provider's own id, a repeat ingestion returns the original payment and
+    case — no duplicate rows, no duplicate recovery workflow."""
+    from sqlalchemy import func, select
+
+    body = {
+        "amount": 42_000,
+        "failure_reason": "insufficient_funds",
+        "provider_payment_id": "pay_evt_dedup_1",
+        "customer_reference": "cust_dedup",
+    }
+
+    first = await client.post("/api/v1/payments", json=body)
+    assert first.status_code == 201
+    assert first.json()["deduplicated"] is False
+
+    second = await client.post("/api/v1/payments", json=body)
+    assert second.status_code == 201
+    assert second.json()["deduplicated"] is True
+    assert second.json()["payment_id"] == first.json()["payment_id"]
+    assert second.json()["recovery_case_id"] == first.json()["recovery_case_id"]
+
+    third = await client.post("/api/v1/payments", json=body)
+    assert third.json()["deduplicated"] is True
+
+    payment_count = (
+        await db_session.execute(
+            select(func.count()).select_from(Payment).where(
+                Payment.provider_payment_id == "pay_evt_dedup_1"
+            )
+        )
+    ).scalar_one()
+    assert payment_count == 1
+    case_count = (await db_session.execute(select(func.count()).select_from(RecoveryCase))).scalar_one()
+    assert case_count == 1
+
+    # The dedup is auditable, not silent.
+    events = await client.get(
+        "/api/v1/audit-events", params={"event_type": "payment_ingest_deduplicated"}
+    )
+    assert events.json()["total"] == 2
+
+
+@pytest.mark.asyncio
+async def test_ingest_without_a_provider_payment_id_is_not_deduplicated(client, db_session):
+    """No provider id -> nothing to dedup on -> each call is a distinct
+    reported attempt. (This is the synthetic/anonymous one-off case.)"""
+    from sqlalchemy import func, select
+
+    for _ in range(2):
+        resp = await client.post("/api/v1/payments", json={"amount": 5_000})
+        assert resp.json()["deduplicated"] is False
+
+    payment_count = (await db_session.execute(select(func.count()).select_from(Payment))).scalar_one()
+    assert payment_count == 2
+
+
+@pytest.mark.asyncio
 async def test_create_case_for_missing_payment_returns_404(client):
     response = await client.post(
         "/api/v1/recovery-cases", json={"payment_id": str(uuid.uuid4())}
@@ -206,7 +265,7 @@ async def test_ingested_case_can_be_diagnosed_end_to_end(client):
 
     diagnose = await client.post(f"/api/v1/recovery-cases/{case_id}/diagnose")
     assert diagnose.status_code == 200
-    # No Gemini key in the test env -> safe fallback -> ESCALATED, never a crash.
+    # No Groq key in the test env -> safe fallback -> ESCALATED, never a crash.
     assert diagnose.json()["case_status"] in {
         RecoveryCaseStatus.APPROVED.value,
         RecoveryCaseStatus.ESCALATED.value,

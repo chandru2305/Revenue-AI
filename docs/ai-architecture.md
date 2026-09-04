@@ -33,58 +33,101 @@ app/ai/
     diagnosis_v1.py    versioned system prompt + input formatter
   providers/
     base.py            AIProvider interface + AIProviderError hierarchy
-    gemini.py           GeminiProvider (google-genai Interactions API)
+    groq.py             GroqProvider (groq SDK, OpenAI-compatible chat API)
     fake.py             FakeAIProvider — deterministic, used in every test
   service.py           AIRecommendationService — retry + safe fallback
   dependencies.py      FastAPI wiring (get_ai_provider / get_ai_service)
 ```
 
 `AIProvider.diagnose_payment(context) -> RecoveryRecommendation` is the
-entire interface. `GeminiProvider` and `FakeAIProvider` both implement it;
+entire interface. `GroqProvider` and `FakeAIProvider` implement it;
 `app.services.diagnosis_service` and `AIRecommendationService` never know
-or care which one they're talking to. Adding a second real provider later
-means writing one more file in `providers/` — nothing else changes.
+or care which one they're talking to.
 
-## Gemini integration — what was actually verified
+**The abstraction is load-bearing, not decorative.** `FakeAIProvider`
+depends on it for every test, and swapping vendors means adding one file
+in `providers/` and changing `dependencies.get_ai_provider` — nothing in
+the services or API layer moves. That was demonstrated in practice: this
+project previously ran on Google Gemini, and the migration to Groq
+touched only the provider file, the dependency wiring, and config.
 
-The current official docs were fetched and cross-checked during Phase 2
-development (not assumed from training knowledge), and the request shape
-was verified against the real API with an intentionally invalid key
-(confirmed the failure was `API key not valid`, a real API-level 400, not
-a client-side shape error):
+`GROQ_API_KEY` must be set or the diagnose endpoint degrades to the safe
+ESCALATE fallback — an unconfigured deployment still works, it just never
+automates.
 
-- Package: `google-genai==2.20.0` (`pip install -U google-genai`).
-- Call surface: **Interactions API**, not the older `generate_content`
-  API — `client.aio.interactions.create(model=..., system_instruction=...,
-  input=..., response_format={...}, timeout=...)`. The async variant
-  (`client.aio.interactions`) is a real coroutine function, verified by
+## Groq integration — what was actually verified
+
+Verified against the live API on 1 Sep 2026 with a real key, not assumed
+from training knowledge:
+
+- Package: `groq==0.33.0`.
+- Call surface: OpenAI-compatible chat completions —
+  `client.chat.completions.create(model=..., messages=[...],
+  response_format=..., temperature=..., timeout=...)`. The async client
+  (`AsyncGroq`) exposes it as a real coroutine function, verified by
   introspection against the installed package.
-- Structured output: `response_format={"type": "text", "mime_type":
-  "application/json", "schema": PydanticModel.model_json_schema()}`,
-  result parsed via `Model.model_validate_json(interaction.output_text)`.
-- Default model: `gemini-2.5-flash` — documented by Google as "best
-  price-performance... low-latency, high-volume tasks that require
-  reasoning," which is exactly this workload (a bounded classification +
-  short-explanation task, run per recovery case). Configurable via
-  `GEMINI_MODEL`; a newer flagship (`gemini-3.7-flash` at the time of
-  writing) can be swapped in without a code change.
-- API key resolution: read only from `Settings.gemini_api_key`
-  (`GEMINI_API_KEY` env var) — never falls back to the SDK's own
-  environment-variable auto-detection, to keep all configuration flowing
-  through `app.core.config` as the rest of the app does.
+- Structured output: `response_format={"type": "json_object"}`. This
+  guarantees *valid JSON* but does **not** enforce a schema, so
+  `RecoveryRecommendation.model_validate_json` in the provider is the only
+  thing standing between model output and the domain — a bad enum value or
+  an out-of-range confidence is rejected there, not downstream.
+- **Groq requires the literal word "json" somewhere in the messages** when
+  `json_object` is used, or the request is rejected with a 400. The
+  versioned prompt (`diagnosis_v1`) predates Groq and must not be edited
+  in place — its wording is pinned to the audit trail — so `GroqProvider`
+  appends a short output-format directive itself. Found by a live call,
+  not by reading docs.
+- Model: `openai/gpt-oss-120b`, pinned. **Not a floating alias**: the
+  model name is written into every AI-sourced audit event, so a moving
+  target would make a recorded decision unreproducible after the fact. For
+  an auditable financial system that trade-off runs the other way than
+  usual. Configurable via `GROQ_MODEL`.
 
-**Exception handling caveat, documented rather than hidden:** the
-Interactions API raises exceptions from a private module
-(`google.genai._gaos.lib.compat_errors`) — a different, non-public
-hierarchy from the documented `google.genai.errors.APIError` used by the
-older API. `GeminiProvider._classify` matches on exception *class name*
-(`"RateLimitError"`, `"AuthenticationError"`, `"APITimeoutError"`, ...)
-rather than importing that private module, so a future SDK release
-changing its internals doesn't break an import — but it also means
-classification is best-effort. This doesn't weaken safety: every failure,
-correctly classified or not, produces the same outcome — a fallback
-ESCALATE — so a classification miss only affects the audit trail's
+  Candidates were compared on the real API across a spread of cases
+  (transient failure, repeated failure, expired card, stale high-value)
+  before pinning — all returned valid, *varied*, case-appropriate
+  recommendations rather than one canned answer:
+
+  | Model | Result |
+  |---|---|
+  | **`openai/gpt-oss-120b`** | **OK** — most nuanced, ~0.5s server time |
+  | `openai/gpt-oss-20b` | OK — faster, slightly coarser |
+  | `qwen/qwen3.8-27b` | OK |
+  | `qwen/qwen3.6-27b` | OK — slowest of the four |
+
+- API key resolution: read only from `Settings.groq_api_key`
+  (`GROQ_API_KEY` env var) — never the SDK's own environment auto-detection,
+  so all configuration keeps flowing through `app.core.config`.
+- Observed latency: **~1.3s mean** end-to-end per diagnosis. The 45s
+  timeout is deliberate headroom, not a tight bound: a timeout that trips
+  on ordinary latency doesn't protect anything, it just discards a good
+  recommendation and escalates to a human.
+
+**Exception classification** uses `isinstance` against the SDK's public
+exception classes (`RateLimitError`, `AuthenticationError`,
+`APITimeoutError`, `APIConnectionError`, `InternalServerError`,
+`PermissionDeniedError`). Anything unrecognized falls through to
+"unavailable" — failing closed, so an unclassified error still produces a
+safe fallback rather than being mistaken for success. Every failure,
+classified correctly or not, produces the same outcome (a fallback
+ESCALATE), so a classification miss only affects the audit trail's
 `failure_code` label, never behavior.
+
+### A note on provider migration
+
+This project previously ran on Google Gemini via `google-genai`'s
+Interactions API. The migration to Groq touched the provider file, the
+dependency wiring, and config — nothing in the services, API, policy
+engine, or state machine. That is the `AIProvider` abstraction doing the
+job it exists for.
+
+The migration also surfaced two defects a fake provider could never have
+caught, both worth recording: the previously pinned Gemini model had been
+retired (`404 — no longer available to new users`), and the 20s timeout
+then in place was below observed latency. In both cases the safe-fallback
+path behaved exactly as designed — a recorded `ESCALATE`, no crash, no
+invented recommendation — which is stronger evidence for the fallback
+design than any test double could provide.
 
 ## Structured output & validation
 
@@ -99,11 +142,13 @@ class RecoveryRecommendation(BaseModel):
     decision_explanation: str               # 1–600 chars
 ```
 
-Gemini's structured-output mode constrains the model to this JSON schema
-at generation time, and `model_validate_json` re-validates on the way
-back in — an out-of-range confidence, an invalid enum string, or
-non-JSON output all raise `AIProviderInvalidResponseError`, never get
-silently coerced or clamped.
+Groq's `json_object` mode guarantees the response *parses* as JSON, but
+enforces no schema — so `model_validate_json` in the provider is the only
+thing that constrains it to this shape. An out-of-range confidence, an
+invalid enum string, or non-JSON output all raise
+`AIProviderInvalidResponseError`, and are never silently coerced or
+clamped. Because the provider does not enforce the schema, this
+validation is load-bearing rather than a second line of defence.
 
 ## Fallback behavior
 
@@ -145,14 +190,15 @@ case structurally invalid. See `test_repeated_diagnose_request_is_rejected_not_r
 `evaluation/generators/split.py::held_out_split` divides the dataset by a
 SHA-256 hash of `case_id` into development/held-out sets — deterministic,
 stable even if the dataset is regenerated at a different size for the
-same seed. `evaluation/run_ai_evaluation.py` scores both the baseline and
-a Gemini-backed strategy (`evaluation/ai_strategy/gemini_strategy.py`,
-independently implemented from `backend/app/ai` — see
-docs/evaluation-methodology.md on why) against the *same* held-out subset
-and writes a comparison report to `evaluation/reports/ai_comparisons/`
-(a separate directory from `evaluation/reports/` specifically so the
-backend's `GET /api/v1/evaluation/summary`, which expects the
-single-strategy shape, never picks one up by mistake).
+same seed. `evaluation/run_ai_evaluation.py`
+scores the baseline and the LLM strategy against the *same* held-out
+subset and writes a comparison report to
+`evaluation/reports/ai_comparisons/`. Prompt and schema live in
+`evaluation/ai_strategy/shared.py`, independently implemented from
+`backend/app/ai` — see docs/evaluation-methodology.md,
+which also carries the first real result: **the LLM underperformed the
+rule-based baseline on every metric** on a 30-case clean run, on a
+benchmark structurally biased toward the baseline.
 
 ## Known limitations
 
@@ -167,18 +213,14 @@ single-strategy shape, never picks one up by mistake).
    dashboard with no current multi-operator access.
 2. **Exception classification is best-effort** (see above) — informational
    only, doesn't affect the fallback behavior itself.
-3. **No real Gemini evaluation could be run during Phase 2 development** —
-   no `GEMINI_API_KEY` was available in the build environment. Everything
-   in this document was verified through: (a) fetching current official
-   docs, (b) a live request against the real API with an intentionally
-   invalid key (confirmed the request shape reaches the API and gets a
-   real auth error back), and (c) the full `FakeAIProvider`-driven test
-   suite plus a live browser run of the actual fallback path (screenshot
-   in the Phase 2 report). The `python -m evaluation.run_ai_evaluation`
-   command is implemented and tested for its skip-gracefully path; running
-   it with real comparison numbers requires a key this environment didn't
-   have. See the Phase 2 report for exactly what was and wasn't executed.
-4. **`evaluation/ai_strategy/gemini_strategy.py` duplicates prompt logic**
+3. **The LLM underperforms the rule-based baseline on the current
+   benchmark.** A clean 30-case run (0 provider failures) scored the LLM
+   below the baseline on every metric. The benchmark is structurally
+   unfavourable to it — ground truth was authored from the same
+   heuristics the baseline implements — but the result stands as measured:
+   on this evidence the deterministic baseline is the better recommender.
+   See docs/evaluation-methodology.md for the numbers and the caveats.
+4. **`evaluation/ai_strategy/groq_strategy.py` duplicates prompt logic**
    from `backend/app/ai/prompts/diagnosis_v1.py` rather than importing it
    — consistent with `evaluation/`'s existing no-backend-dependency design
    (see docs/evaluation-methodology.md), but it means the two prompts can

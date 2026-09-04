@@ -45,7 +45,9 @@ async def receive_razorpay_webhook(
         response.status_code = status.HTTP_400_BAD_REQUEST
         return WebhookAckResponse(status="rejected")
 
-    event = parse_event(payload)
+    # Razorpay's own delivery id, when present, is a stronger dedup handle
+    # than anything derivable from the payload — see webhooks.build_dedup_key.
+    event = parse_event(payload, event_id=request.headers.get("x-razorpay-event-id"))
     correlation_id = get_correlation_id() or event.dedup_key
 
     result = await webhook_service.process_webhook_event(session, event, correlation_id=correlation_id)

@@ -20,7 +20,27 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime
 
-from app.domain.enums import NotificationMedium, PaymentStatus, RecoveryPaymentRequestStatus
+from app.domain.enums import (
+    NotificationMedium,
+    PaymentStatus,
+    RecoveryAction,
+    RecoveryPaymentRequestStatus,
+)
+
+# Which recovery actions this provider abstraction can actually carry out.
+#
+# Deliberately narrower than `RecoveryAction`: RETRY_PAYMENT has no
+# real-provider implementation (Razorpay has no generic "retry a failed
+# payment" endpoint — see docs/razorpay-integration.md "Reality check"),
+# and SEND_REMINDER's notify path exists on the interface but isn't wired
+# into the execution flow yet.
+#
+# This lives in the domain layer rather than inside execution_service so
+# that diagnosis_service can consult it too: a case whose recommended
+# action can't be executed must never reach APPROVED, because APPROVED
+# means "ready to execute". Without this, such a case advertised an
+# Execute button that could only ever fail.
+EXECUTABLE_ACTIONS: frozenset[RecoveryAction] = frozenset({RecoveryAction.SEND_PAYMENT_LINK})
 
 
 class PaymentProviderError(Exception):
@@ -124,3 +144,14 @@ class PaymentProvider(ABC):
     @abstractmethod
     async def notify_payment_link(self, provider_reference: str, medium: NotificationMedium) -> bool:
         raise NotImplementedError
+
+    async def aclose(self) -> None:
+        """Release any long-lived resources (a pooled HTTP client, a socket).
+
+        Deliberately concrete-with-a-no-op rather than abstract: a provider
+        holding nothing (the fake, the unconfigured stand-in) shouldn't be
+        forced to write an empty method, and the application shutdown path
+        can call this on whatever provider is active without type-checking
+        it first. See `app.main.lifespan`.
+        """
+        return None

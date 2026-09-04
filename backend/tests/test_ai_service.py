@@ -30,13 +30,13 @@ VALID_RECOMMENDATION = RecoveryRecommendation(
 @pytest.mark.asyncio
 async def test_successful_call_returns_ai_sourced_outcome():
     provider = FakeAIProvider(recommendation=VALID_RECOMMENDATION)
-    service = AIRecommendationService(provider, model_name="gemini-2.5-flash", max_retries=1)
+    service = AIRecommendationService(provider, model_name="openai/gpt-oss-120b", max_retries=1)
 
     outcome = await service.get_recommendation(CONTEXT)
 
     assert outcome.decision_source == DecisionSource.AI
     assert outcome.recommendation == VALID_RECOMMENDATION
-    assert outcome.model == "gemini-2.5-flash"
+    assert outcome.model == "openai/gpt-oss-120b"
     assert outcome.failure_code is None
     assert provider.call_count == 1
 
@@ -44,7 +44,7 @@ async def test_successful_call_returns_ai_sourced_outcome():
 @pytest.mark.asyncio
 async def test_timeout_falls_back_to_escalate_after_exhausting_retries():
     provider = FakeAIProvider(raise_error=AIProviderTimeoutError("simulated timeout"))
-    service = AIRecommendationService(provider, model_name="gemini-2.5-flash", max_retries=2)
+    service = AIRecommendationService(provider, model_name="openai/gpt-oss-120b", max_retries=2)
 
     outcome = await service.get_recommendation(CONTEXT)
 
@@ -59,7 +59,7 @@ async def test_timeout_falls_back_to_escalate_after_exhausting_retries():
 @pytest.mark.asyncio
 async def test_auth_error_does_not_retry():
     provider = FakeAIProvider(raise_error=AIProviderAuthError("bad key"))
-    service = AIRecommendationService(provider, model_name="gemini-2.5-flash", max_retries=2)
+    service = AIRecommendationService(provider, model_name="openai/gpt-oss-120b", max_retries=2)
 
     outcome = await service.get_recommendation(CONTEXT)
 
@@ -72,7 +72,7 @@ async def test_auth_error_does_not_retry():
 @pytest.mark.asyncio
 async def test_malformed_response_falls_back_without_retry():
     provider = FakeAIProvider(malformed=True)
-    service = AIRecommendationService(provider, model_name="gemini-2.5-flash", max_retries=2)
+    service = AIRecommendationService(provider, model_name="openai/gpt-oss-120b", max_retries=2)
 
     outcome = await service.get_recommendation(CONTEXT)
 
@@ -84,7 +84,7 @@ async def test_malformed_response_falls_back_without_retry():
 @pytest.mark.asyncio
 async def test_zero_max_retries_still_falls_back_safely():
     provider = FakeAIProvider(raise_error=AIProviderTimeoutError("simulated timeout"))
-    service = AIRecommendationService(provider, model_name="gemini-2.5-flash", max_retries=0)
+    service = AIRecommendationService(provider, model_name="openai/gpt-oss-120b", max_retries=0)
 
     outcome = await service.get_recommendation(CONTEXT)
 
@@ -95,7 +95,7 @@ async def test_zero_max_retries_still_falls_back_safely():
 @pytest.mark.asyncio
 async def test_fallback_never_raises_even_on_unexpected_error_type():
     provider = FakeAIProvider(raise_error=AIProviderInvalidResponseError("weird shape"))
-    service = AIRecommendationService(provider, model_name="gemini-2.5-flash", max_retries=1)
+    service = AIRecommendationService(provider, model_name="openai/gpt-oss-120b", max_retries=1)
 
     # Must not raise — the whole point of this service is that it never
     # propagates a provider failure to the caller.

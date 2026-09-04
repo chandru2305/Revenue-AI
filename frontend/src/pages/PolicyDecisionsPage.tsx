@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { api } from "../api/client";
 import { useApiResource } from "../api/useApiResource";
-import type { AuditEventRead } from "../api/types";
+import type { AuditEventRead, SystemInfo } from "../api/types";
 import { formatDateTime, formatPercent, formatRelative, humanize } from "../lib/format";
 import { policyPhase, REASON_CODE_LABEL } from "../lib/labels";
 import { CaseDrawer } from "../components/CaseDrawer";
@@ -40,7 +40,7 @@ async function fetchPolicyEvents(): Promise<AuditEventRead[]> {
   return [...evaluated.items, ...rechecked.items].sort((a, b) => b.created_at.localeCompare(a.created_at));
 }
 
-export function PolicyDecisionsPage() {
+export function PolicyDecisionsPage({ system }: { system?: SystemInfo | null }) {
   const { state, refetch } = useApiResource(fetchPolicyEvents, []);
   const [decisionFilter, setDecisionFilter] = useState<"all" | "allow" | "block">("all");
   const [selected, setSelected] = useState<string | null>(null);
@@ -157,7 +157,14 @@ export function PolicyDecisionsPage() {
         </>
       )}
 
-      {selected && <CaseDrawer caseId={selected} onClose={() => setSelected(null)} onMutated={refetch} />}
+      {selected && (
+        <CaseDrawer
+          caseId={selected}
+          system={system}
+          onClose={() => setSelected(null)}
+          onMutated={refetch}
+        />
+      )}
     </>
   );
 }

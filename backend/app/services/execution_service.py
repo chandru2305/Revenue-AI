@@ -36,6 +36,7 @@ from app.domain.enums import (
 )
 from app.domain.policy import PolicyDecision, PolicyEvaluationInput, evaluate_policy
 from app.domain.providers.base import (
+    EXECUTABLE_ACTIONS,
     CreatePaymentLinkRequest,
     PaymentLinkSnapshot,
     PaymentProvider,
@@ -55,11 +56,6 @@ from app.schemas.execution import ExecutionResponse
 from app.services import audit_service
 from app.services.concurrency import guard_against_concurrent_modification
 from app.services.policy_service import get_policy_config
-
-# Only this action is actually implemented against a real provider in
-# Phase 3 — see docs/razorpay-integration.md on why RETRY_PAYMENT isn't a
-# generic Razorpay operation and isn't invented as one.
-_IMPLEMENTED_ACTIONS = frozenset({RecoveryAction.SEND_PAYMENT_LINK})
 
 _PROVIDER_NAME = "razorpay"
 
@@ -155,8 +151,12 @@ async def _execute_recovery_case(
             decision=decision,
         )
 
+    # Defence in depth: diagnosis_service already refuses to route a
+    # non-executable action to APPROVED (see `_resolve_next_status`), so a
+    # case reaching here with one means it was approved under an older
+    # build or edited out of band. Escalate rather than trust it.
     proposed_action = RecoveryAction(case.recommended_action)
-    if proposed_action not in _IMPLEMENTED_ACTIONS:
+    if proposed_action not in EXECUTABLE_ACTIONS:
         return await _escalate(
             session,
             case,

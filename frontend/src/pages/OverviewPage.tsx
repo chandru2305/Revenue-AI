@@ -1,9 +1,11 @@
 import { useState } from "react";
 import { api } from "../api/client";
 import { useApiResource } from "../api/useApiResource";
-import type { AuditEventRead, RecoveryCaseStatus } from "../api/types";
+import type { AuditEventRead, RecoveryCaseStatus, SystemInfo } from "../api/types";
 import { formatMoney, formatNumber, formatPercent, formatRelative, humanize } from "../lib/format";
 import { statusTone, type Tone } from "../lib/labels";
+import { AgentConsole } from "../components/AgentConsole";
+import { ActivityFeed } from "../components/ActivityFeed";
 import { IngestPaymentModal } from "../components/IngestPaymentModal";
 import { ReasonCodes } from "../components/PolicyBadge";
 import { Badge, Button, Card, EmptyState, ErrorState, LoadingState, StatTile } from "../components/ui";
@@ -16,18 +18,43 @@ const TONE_COLOR: Record<Tone, string> = {
   neutral: "var(--text-subtle)",
 };
 
-export function OverviewPage() {
+const TERMINALish = new Set(["recovered", "stopped", "escalated", "ineligible", "failed"]);
+
+export function OverviewPage({ system }: { system?: SystemInfo | null }) {
   const recovery = useApiResource(() => api.getRecoverySummary(), []);
   const evalRun = useApiResource(() => api.getEvaluationSummary(), []);
   const policyEvents = useApiResource(
-    () => api.listAuditEvents({ entity_type: "recovery_case", event_type: "policy_evaluated", page_size: 50 }),
+    () => api.listAuditEvents({ entity_type: "recovery_case", event_type: "policy_evaluated", page_size: 100 }),
     [],
   );
   const [modal, setModal] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [banner, setBanner] = useState<{ tone: Tone; text: string } | null>(null);
 
   function refreshAll() {
     recovery.refetch();
     policyEvents.refetch();
+  }
+
+  async function seedBatch() {
+    setBusy(true);
+    setBanner(null);
+    try {
+      const r = await api.seedDemoBatch();
+      setBanner({
+        tone: "warn",
+        text:
+          `Recovery batch: ${r.cases_processed} cases, diagnosed by ${r.ai_model} → ` +
+          `${formatMoney(r.summary.confirmed_recovered_revenue)} recovered of ` +
+          `${formatMoney(r.summary.eligible_revenue)} eligible ` +
+          `(${formatPercent(r.summary.recovery_rate)}). ${r.provenance}`,
+      });
+      refreshAll();
+    } catch (e) {
+      setBanner({ tone: "danger", text: e instanceof Error ? e.message : "Demo batch failed." });
+    } finally {
+      setBusy(false);
+    }
   }
 
   if (recovery.state.status === "loading") return <LoadingState label="Loading recovery posture…" />;
@@ -36,52 +63,74 @@ export function OverviewPage() {
   const live = recovery.state.data;
   const statuses = Object.entries(live.cases_by_status) as [RecoveryCaseStatus, number][];
   const total = statuses.reduce((sum, [, n]) => sum + n, 0);
+  const byStatus = live.cases_by_status;
+  const activeCases = total - statuses.reduce((s, [k, n]) => s + (TERMINALish.has(k) ? n : 0), 0);
 
-  const recentBlocks =
-    policyEvents.state.status === "success"
-      ? policyEvents.state.data.items.filter((e) => (e.payload as { decision?: string }).decision === "block").slice(0, 6)
-      : [];
+  const policyRows: AuditEventRead[] =
+    policyEvents.state.status === "success" ? policyEvents.state.data.items : [];
+  const allowed = policyRows.filter((e) => (e.payload as { decision?: string }).decision === "allow").length;
+  const blocked = policyRows.filter((e) => (e.payload as { decision?: string }).decision === "block").length;
+  const recentBlocks = policyRows
+    .filter((e) => (e.payload as { decision?: string }).decision === "block")
+    .slice(0, 6);
 
   return (
     <>
       <div className="toolbar">
-        <div>
-          <p className="page-intro" style={{ marginBottom: 0 }}>
-            Computed live from this database’s <span className="cell-mono">recovery_cases</span>. Revenue counts
-            as recovered only after a signature-verified Razorpay webhook — never on link creation.
-          </p>
-        </div>
+        <p className="page-intro" style={{ marginBottom: 0 }}>
+          A bounded autonomous agent: it discovers failed payments, asks Groq to diagnose them,
+          lets the deterministic policy engine decide, executes only permitted actions, and confirms
+          recovery through a signature-verified webhook. Revenue counts as recovered only on that
+          webhook — never on link creation.
+        </p>
         <div className="toolbar__spacer" />
-        <Button onClick={() => setModal(true)}>Ingest payment</Button>
-        <Button
-          variant="primary"
-          onClick={async () => {
-            await api.runDiscovery();
-            refreshAll();
-          }}
-        >
-          Run discovery sweep
+        <Button variant="primary" onClick={() => setModal(true)}>Ingest payment event</Button>
+        <Button onClick={seedBatch} disabled={busy} title="Developer tool — seeds 30 curated input scenarios and runs each through the real diagnosis + policy pipeline. Disabled in production.">
+          {busy ? "Seeding…" : "Seed demo batch (dev)"}
         </Button>
       </div>
 
-      <div className="grid grid--stats">
-        <StatTile label="Cases tracked" value={formatNumber(live.cases_total)} hint={`${formatNumber(live.cases_eligible)} eligible`} />
-        <StatTile label="Eligible revenue" value={formatMoney(live.eligible_revenue)} />
+      {banner && (
+        <div
+          className="inline-note"
+          style={{
+            marginBottom: 18,
+            borderLeftColor:
+              banner.tone === "danger"
+                ? "var(--danger)"
+                : banner.tone === "warn"
+                  ? "var(--warn)"
+                  : "var(--accent)",
+          }}
+        >
+          {banner.text}
+        </div>
+      )}
+
+      <AgentConsole summary={live} onActivity={refreshAll} />
+
+      <div className="grid grid--stats section-gap">
         <StatTile
-          label="Confirmed recovered"
+          label="Recovered revenue"
           value={formatMoney(live.confirmed_recovered_revenue)}
           tone={live.confirmed_recovered_revenue > 0 ? "ok" : undefined}
+          hint="webhook-confirmed only"
         />
         <StatTile label="Recovery rate" value={formatPercent(live.recovery_rate)} hint="confirmed ÷ eligible" />
-        <StatTile label="Outstanding" value={formatMoney(live.outstanding_revenue)} tone={live.outstanding_revenue > 0 ? "danger" : undefined} />
+        <StatTile label="Recovered cases" value={formatNumber(byStatus.recovered ?? 0)} />
+        <StatTile label="Policy allowed" value={formatNumber(allowed)} tone={allowed > 0 ? "ok" : undefined} />
+        <StatTile label="Policy blocked" value={formatNumber(blocked)} tone={blocked > 0 ? "danger" : undefined} />
+        <StatTile label="Escalated" value={formatNumber(byStatus.escalated ?? 0)} />
+        <StatTile label="Stopped" value={formatNumber(byStatus.stopped ?? 0)} />
+        <StatTile label="Active recovery cases" value={formatNumber(activeCases)} />
       </div>
 
-      <div className="section-gap">
+      <div className="grid grid--2 section-gap">
         <Card title="Case distribution">
           {total === 0 ? (
             <EmptyState
               title="No recovery cases yet."
-              hint="Ingest a failed payment or run a discovery sweep to populate this deployment."
+              hint="Ingest a failed payment or run a recovery cycle to populate this deployment."
               action={<Button variant="primary" onClick={() => setModal(true)}>Ingest payment</Button>}
             />
           ) : (
@@ -107,6 +156,10 @@ export function OverviewPage() {
             </>
           )}
         </Card>
+
+        <Card title="Live agent activity" actions={<span className="subtle">audit trail · auto-refresh</span>}>
+          <ActivityFeed limit={22} />
+        </Card>
       </div>
 
       <div className="grid grid--2 section-gap">
@@ -125,10 +178,7 @@ export function OverviewPage() {
           </dl>
         </Card>
 
-        <Card
-          title="Recent policy blocks"
-          actions={<span className="subtle">deterministic gate</span>}
-        >
+        <Card title="Recent policy blocks" actions={<span className="subtle">deterministic gate</span>}>
           {policyEvents.state.status === "loading" && <LoadingState label="Loading…" />}
           {policyEvents.state.status === "error" && <ErrorState message={policyEvents.state.error} />}
           {policyEvents.state.status === "success" && recentBlocks.length === 0 && (
@@ -170,6 +220,15 @@ export function OverviewPage() {
           {evalRun.state.status === "error" && <ErrorState message={evalRun.state.error} />}
         </Card>
       </div>
+
+      {system?.demo_mode && (
+        <p className="demo-disclosure section-gap">
+          <b>Demo mode.</b> Payment confirmation is simulated because Razorpay Test Mode credentials
+          are not configured here. Recovery orchestration, policy enforcement, webhook processing, and
+          audit logic all use the same application pipeline. The recovered-revenue figure is a real
+          measurement over real rows — not a Razorpay result.
+        </p>
+      )}
 
       {modal && <IngestPaymentModal onClose={() => setModal(false)} onDone={refreshAll} />}
     </>

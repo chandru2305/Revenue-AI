@@ -1,6 +1,6 @@
 """AI provider interface.
 
-Any provider (Gemini today, others later) must implement `diagnose_payment`
+Any provider (Groq today, others later) must implement `diagnose_payment`
 and raise only `AIProviderError` subclasses on failure — callers
 (`app.ai.service.AIRecommendationService`) never need to know which
 concrete provider or SDK is behind this interface, and never see a raw

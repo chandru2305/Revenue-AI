@@ -69,7 +69,13 @@ _CONFIDENCE_GATED_ACTIONS = _ACTIVE_RECOVERY_ACTIONS
 
 @dataclass(frozen=True)
 class PolicyConfig:
-    """Deterministic thresholds. Construct explicitly; do not read env vars here."""
+    """Deterministic thresholds. Construct explicitly; do not read env vars here.
+
+    Every field here must be wired through `app.services.policy_service.
+    get_policy_config` — a field that exists here but isn't passed there is
+    silently un-configurable, which is exactly the kind of gap
+    `test_policy_service.py` now guards against.
+    """
 
     policy_version: str = POLICY_VERSION
     max_retry_count: int = 3
@@ -78,6 +84,11 @@ class PolicyConfig:
     min_confidence_threshold: float = 0.55
     high_value_amount_threshold: int = 500_000  # smallest currency unit (e.g. paise)
     high_value_min_confidence_threshold: float = 0.75
+    # Hard ceiling on what a single recovery may ever pursue. Without this,
+    # a corrupted or mis-ingested `Payment.amount` (an extra three zeros)
+    # passes on confidence alone and is sent straight to the provider. A
+    # bound that has to be raised deliberately is much safer than none.
+    max_recovery_amount: int = 10_000_000  # 100,000.00 in major units
 
 
 @dataclass(frozen=True)
@@ -130,7 +141,7 @@ def evaluate_policy(policy_input: PolicyEvaluationInput, config: PolicyConfig) -
     ):
         reason_codes.append(PolicyReasonCode.MAX_CONTACTS_REACHED)
 
-    if policy_input.amount <= 0:
+    if policy_input.amount <= 0 or policy_input.amount > config.max_recovery_amount:
         reason_codes.append(PolicyReasonCode.AMOUNT_OUT_OF_BOUNDS)
 
     if policy_input.proposed_action in _CONFIDENCE_GATED_ACTIONS:

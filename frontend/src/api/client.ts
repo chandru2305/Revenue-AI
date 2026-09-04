@@ -1,7 +1,11 @@
 import type {
   AuditEventRead,
+  DemoBatchResponse,
   DiagnosisResponse,
   DiscoveryReport,
+  OrchestratorStatus,
+  RecoveryCycleReport,
+  SystemInfo,
   EvaluationSummaryRead,
   ExecutionResponse,
   HealthCheckResponse,
@@ -18,6 +22,17 @@ import type {
 
 const API_BASE_URL: string = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000";
 const API_V1_PREFIX = "/api/v1";
+
+// Sent as X-API-Key when the backend has auth enabled. This is baked into
+// the JS bundle at build time and is therefore readable by anyone who
+// opens devtools — it is a deployment gate ("can this browser reach this
+// deployment"), not a user credential, and must not be treated as a
+// secret. See docs/security.md "API authentication".
+const API_KEY: string = import.meta.env.VITE_API_KEY ?? "";
+
+function authHeaders(): Record<string, string> {
+  return API_KEY ? { "X-API-Key": API_KEY } : {};
+}
 
 export class ApiError extends Error {
   status: number;
@@ -50,7 +65,9 @@ async function request<T>(path: string, params?: object): Promise<T> {
     }
   }
 
-  const response = await fetch(url.toString(), { headers: { Accept: "application/json" } });
+  const response = await fetch(url.toString(), {
+    headers: { Accept: "application/json", ...authHeaders() },
+  });
   if (!response.ok) throw await parseError(response, path);
   return (await response.json()) as T;
 }
@@ -60,6 +77,7 @@ async function requestPost<T>(path: string, body?: unknown): Promise<T> {
     method: "POST",
     headers: {
       Accept: "application/json",
+      ...authHeaders(),
       ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
     },
     body: body !== undefined ? JSON.stringify(body) : undefined,
@@ -101,6 +119,21 @@ export const api = {
     }),
 
   runDiscovery: () => requestPost<DiscoveryReport>(`${API_V1_PREFIX}/recovery-cases/discover`),
+
+  // One pass of the autonomous loop: discover -> diagnose -> (optionally) execute.
+  runRecoveryCycle: (autoExecute?: boolean) =>
+    requestPost<RecoveryCycleReport>(
+      `${API_V1_PREFIX}/orchestrator/cycle${autoExecute === undefined ? "" : `?auto_execute=${autoExecute}`}`,
+    ),
+
+  // Read-only snapshot of the autonomous recovery agent, from the audit trail.
+  getOrchestratorStatus: () =>
+    request<OrchestratorStatus>(`${API_V1_PREFIX}/orchestrator/status`),
+
+  // How this deployment is wired (provider modes, policy limits).
+  getSystemInfo: () => request<SystemInfo>(`${API_V1_PREFIX}/system/info`),
+
+  seedDemoBatch: () => requestPost<DemoBatchResponse>(`${API_V1_PREFIX}/demo/seed-batch`),
 
   diagnoseRecoveryCase: (caseId: string) =>
     requestPost<DiagnosisResponse>(`${API_V1_PREFIX}/recovery-cases/${caseId}/diagnose`),

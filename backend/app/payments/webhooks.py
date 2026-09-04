@@ -34,21 +34,51 @@ class ParsedWebhookEvent:
     amount_paid: int | None
     payment_id: str | None
     dedup_key: str
+    # True when `dedup_key` came from Razorpay's own delivery id rather
+    # than from the payload's content. Recorded so the audit trail shows
+    # which idempotency guarantee a given event actually got.
+    dedup_key_source: str = "payload"
 
 
-def parse_event(payload: dict[str, Any]) -> ParsedWebhookEvent:
+def build_dedup_key(payload: dict[str, Any], event_id: str | None = None) -> tuple[str, str]:
+    """Returns `(dedup_key, source)`.
+
+    Razorpay sends an `X-Razorpay-Event-Id` header that is stable across
+    redeliveries of the same event — the canonical idempotency handle, and
+    strictly better than deriving one from the payload. It is preferred
+    when present.
+
+    The payload-derived fallback, `(event, payment_link_id, payment_id)`,
+    still covers deliveries that arrive without the header. It is slightly
+    weaker: two genuinely distinct events sharing all three values would
+    collide. In practice a payment link reaches a given status once, so
+    that collision is the same "already handled" case we want to suppress
+    anyway.
+    """
+    if event_id:
+        return f"event_id:{event_id}", "event_id"
+
+    event_type = payload.get("event", "")
+    payment_link_entity = payload.get("payload", {}).get("payment_link", {}).get("entity", {})
+    payment_entity = payload.get("payload", {}).get("payment", {}).get("entity", {})
+    payment_link_id = payment_link_entity.get("id")
+    payment_id = payment_entity.get("id")
+    return f"{event_type}:{payment_link_id or ''}:{payment_id or ''}", "payload"
+
+
+def parse_event(payload: dict[str, Any], event_id: str | None = None) -> ParsedWebhookEvent:
     event_type = payload.get("event", "")
     payment_link_entity = payload.get("payload", {}).get("payment_link", {}).get("entity", {})
     payment_entity = payload.get("payload", {}).get("payment", {}).get("entity", {})
 
-    payment_link_id = payment_link_entity.get("id")
-    payment_id = payment_entity.get("id")
+    dedup_key, dedup_key_source = build_dedup_key(payload, event_id)
 
     return ParsedWebhookEvent(
         event_type=event_type,
-        payment_link_id=payment_link_id,
+        payment_link_id=payment_link_entity.get("id"),
         payment_link_status=payment_link_entity.get("status"),
         amount_paid=payment_link_entity.get("amount_paid"),
-        payment_id=payment_id,
-        dedup_key=f"{event_type}:{payment_link_id or ''}:{payment_id or ''}",
+        payment_id=payment_entity.get("id"),
+        dedup_key=dedup_key,
+        dedup_key_source=dedup_key_source,
     )

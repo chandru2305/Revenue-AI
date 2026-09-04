@@ -68,11 +68,11 @@ def _unmatched_link_entity_id(payment_link_id: str) -> uuid.UUID:
 async def process_webhook_event(
     session: AsyncSession, event: ParsedWebhookEvent, *, correlation_id: str
 ) -> WebhookProcessResult:
-    if await _is_duplicate(session, event):
+    # Claim the event BEFORE touching anything else — see `_claim_event`.
+    if not await _claim_event(session, event):
         return WebhookProcessResult(status="duplicate", event_type=event.event_type)
 
     if event.payment_link_id is None or event.payment_link_status not in _RELEVANT_LINK_STATUSES:
-        await _mark_processed(session, event)
         await session.commit()
         return WebhookProcessResult(status="ignored", event_type=event.event_type)
 
@@ -82,29 +82,50 @@ async def process_webhook_event(
     return WebhookProcessResult(status=result_status, event_type=event.event_type)
 
 
-async def _is_duplicate(session: AsyncSession, event: ParsedWebhookEvent) -> bool:
+async def _claim_event(session: AsyncSession, event: ParsedWebhookEvent) -> bool:
+    """Insert this event's dedup row. Returns False if it was already
+    claimed — by an earlier delivery, or by a concurrent one that won the
+    race for the unique constraint on `dedup_key`.
+
+    Ordering matters and is the point of this function. Claiming *first*
+    means the `IntegrityError` rollback can only ever discard this one
+    INSERT. The previous ordering claimed the event last, so losing the
+    race rolled back an already-applied status transition and
+    `recovered_amount` increment while still reporting "processed" — the
+    revenue total was saved only by the independent optimistic-lock guard,
+    and the return value was a lie either way.
+
+    A claim that is made and then abandoned (an exception later in
+    processing rolls the whole transaction back, including this row) is
+    correct too: the event genuinely wasn't processed, so a Razorpay
+    redelivery should — and now will — retry it.
+    """
     stmt = select(ProcessedWebhookEvent).where(ProcessedWebhookEvent.dedup_key == event.dedup_key)
-    existing = (await session.execute(stmt)).scalar_one_or_none()
-    return existing is not None
+    if (await session.execute(stmt)).scalar_one_or_none() is not None:
+        return False
 
-
-async def _mark_processed(session: AsyncSession, event: ParsedWebhookEvent) -> None:
     session.add(
         ProcessedWebhookEvent(provider=_PROVIDER_NAME, event_type=event.event_type, dedup_key=event.dedup_key)
     )
     try:
         await session.flush()
     except IntegrityError:
-        # Lost a race with another concurrent delivery of the same event —
-        # that's fine, it means it's now recorded either way.
+        # Lost the race to a concurrent delivery of the same event. Nothing
+        # else has been mutated yet, so this rollback is contained.
         await session.rollback()
+        return False
+    return True
 
 
 async def _apply_payment_link_event(
     session: AsyncSession, event: ParsedWebhookEvent, *, correlation_id: str
 ) -> str:
     """Returns "processed" if a case was actually affected, "ignored"
-    otherwise (unmatched link, or the case had already moved on)."""
+    otherwise (unmatched link, or the case had already moved on).
+
+    The event is already claimed in the dedup ledger by the time this runs
+    (see `_claim_event`), so nothing here re-records it; the surrounding
+    transaction commits that claim alongside whatever this applies."""
     assert event.payment_link_id is not None  # guaranteed by process_webhook_event's guard
 
     payment_request_repo = RecoveryPaymentRequestRepository(session)
@@ -122,14 +143,12 @@ async def _apply_payment_link_event(
             payload={"payment_link_id": event.payment_link_id, "event_type": event.event_type},
             correlation_id=correlation_id,
         )
-        await _mark_processed(session, event)
         await session.commit()
         return "ignored"
 
     case_repo = RecoveryCaseRepository(session)
     case = await case_repo.get_for_execution(payment_request.recovery_case_id)
     if case is None:  # pragma: no cover - defensive; FK guarantees this can't happen
-        await _mark_processed(session, event)
         await session.commit()
         return "ignored"
 
@@ -156,9 +175,8 @@ async def _apply_payment_link_event(
 
     if case.status != RecoveryCaseStatus.EXECUTING:
         # The case already moved on (e.g. a prior event already resolved
-        # it) — record the event but don't attempt a transition the state
-        # machine would reject anyway.
-        await _mark_processed(session, event)
+        # it) — the event stays claimed, but don't attempt a transition the
+        # state machine would reject anyway.
         await session.commit()
         return "ignored"
 
@@ -179,7 +197,6 @@ async def _apply_payment_link_event(
             attempt.failure_message = f"Payment link ended in status '{new_status.value}'."
         await _transition(session, case, RecoveryCaseStatus.FAILED, correlation_id=correlation_id)
 
-    await _mark_processed(session, event)
     await session.commit()
     return "processed"
 

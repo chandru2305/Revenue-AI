@@ -51,6 +51,11 @@ class PaymentIngestResponse(BaseModel):
     recovery_case_id: uuid.UUID | None
     recovery_case_status: RecoveryCaseStatus | None
     correlation_id: str
+    deduplicated: bool = Field(
+        default=False,
+        description="True when this call matched an existing payment by "
+        "`provider_payment_id` and returned it instead of creating a duplicate.",
+    )
 
 
 class RecoveryCaseCreateRequest(BaseModel):

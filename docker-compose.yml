@@ -1,3 +1,18 @@
+# Full RecoverAI stack: PostgreSQL + FastAPI backend + nginx-served frontend.
+#
+#   make up        -> build + run everything (foreground)
+#   make up-d      -> same, detached, prints the URLs
+#   make down      -> stop (keeps the db volume)
+#
+# Frontend:  http://localhost:8080
+# API docs:  http://localhost:8000/docs
+#
+# Razorpay / Groq keys are optional — without them the app degrades
+# gracefully (execute escalates, diagnose falls back to ESCALATE). Put
+# them in a repo-root .env file and compose will pick them up:
+#   GROQ_API_KEY=...
+#   RAZORPAY_KEY_ID=...  RAZORPAY_KEY_SECRET=...  RAZORPAY_WEBHOOK_SECRET=...
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -17,6 +32,77 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+
+  backend:
+    build:
+      context: ./backend
+      target: runtime
+    container_name: recoverai-backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # Hardcoded so a local (non-docker) .env can't accidentally point the
+      # container at SQLite or the wrong CORS origin.
+      DATABASE_URL: "postgresql+asyncpg://recoverai:recoverai@postgres:5432/recoverai"
+      CORS_ALLOW_ORIGINS: "http://localhost:8080,http://localhost:5173"
+      RAZORPAY_MODE: test
+      APP_ENV: ${APP_ENV:-development}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # Empty by default so `make up` stays zero-config. Set API_KEY in a
+      # repo-root .env to enable auth — and set the SAME value as
+      # VITE_API_KEY below, or the dashboard will get 401s.
+      API_KEY: ${API_KEY:-}
+      # Optional secrets — inherited from a repo-root .env, else empty.
+      # Autonomous loop — off by default so `make up` never starts making
+      # provider calls on its own. Execution stays opt-in even when on.
+      ORCHESTRATOR_ENABLED: ${ORCHESTRATOR_ENABLED:-false}
+      ORCHESTRATOR_INTERVAL_SECONDS: ${ORCHESTRATOR_INTERVAL_SECONDS:-300}
+      ORCHESTRATOR_AUTO_EXECUTE: ${ORCHESTRATOR_AUTO_EXECUTE:-false}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      GROQ_MODEL: ${GROQ_MODEL:-openai/gpt-oss-120b}
+      RAZORPAY_KEY_ID: ${RAZORPAY_KEY_ID:-}
+      RAZORPAY_KEY_SECRET: ${RAZORPAY_KEY_SECRET:-}
+      RAZORPAY_WEBHOOK_SECRET: ${RAZORPAY_WEBHOOK_SECRET:-}
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').status==200 else 1)"
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8080}
+        # Compiled into the bundle at build time, so changing it requires a
+        # rebuild (`make rebuild`), not just a restart. Must match API_KEY.
+        VITE_API_KEY: ${API_KEY:-}
+    container_name: recoverai-frontend
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_started
+    ports:
+      - "8080:80"
+
+  # Not started by `make up` (test profile). `make test` runs it.
+  backend-test:
+    profiles: ["test"]
+    build:
+      context: ./backend
+      target: dev
+    environment:
+      DATABASE_URL: "sqlite+aiosqlite:///:memory:"
+    command: ["python", "-m", "pytest", "-q"]
 
 volumes:
   recoverai-postgres-data:

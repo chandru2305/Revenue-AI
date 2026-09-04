@@ -2,15 +2,37 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator
 
+import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
 import app.models  # noqa: F401  (register all models on Base.metadata)
+from app.ai.dependencies import get_ai_provider
+from app.core.config import get_settings
 from app.db.base import Base
 from app.db.session import get_db
 from app.main import app
+from app.payments.dependencies import get_payment_provider
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_external_providers(monkeypatch):
+    """No test may reach a real external API, regardless of what the
+    developer's `.env` happens to contain. Tests that need a *configured*
+    provider re-set the relevant key explicitly (and get a stubbed client,
+    never a live one). Also clears the provider lru_caches so a real
+    instance built in an earlier context can't leak in."""
+    settings = get_settings()
+    monkeypatch.setattr(settings, "groq_api_key", "")
+    monkeypatch.setattr(settings, "razorpay_key_id", "")
+    monkeypatch.setattr(settings, "razorpay_key_secret", "")
+    get_ai_provider.cache_clear()
+    get_payment_provider.cache_clear()
+    yield
+    get_ai_provider.cache_clear()
+    get_payment_provider.cache_clear()
 
 
 @pytest_asyncio.fixture

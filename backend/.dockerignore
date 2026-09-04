@@ -1,0 +1,16 @@
+.venv
+.venv-eval
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.db
+*.db-journal
+*.sqlite3
+.env
+.env.*
+!.env.example
+Dockerfile
+.dockerignore

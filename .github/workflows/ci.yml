@@ -23,6 +23,48 @@ jobs:
         env:
           DATABASE_URL: sqlite+aiosqlite:///./ci.db
 
+  # The test suite builds its schema with Base.metadata.create_all, so it
+  # would pass even if the Alembic migrations were broken or had drifted
+  # from the models. This job is the only thing that actually exercises
+  # them — and against PostgreSQL, the real target, not SQLite.
+  migrations:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: recoverai
+          POSTGRES_PASSWORD: recoverai
+          POSTGRES_DB: recoverai
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U recoverai -d recoverai"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql+asyncpg://recoverai:recoverai@localhost:5432/recoverai
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements-dev.txt
+      - name: Migrations apply to a fresh database
+        run: python -m alembic upgrade head
+      - name: Models and migrations have not drifted
+        # Fails if a model change was made without a matching migration —
+        # the failure mode the test suite structurally cannot catch.
+        run: python -m alembic check
+      - name: Migrations are reversible
+        run: |
+          python -m alembic downgrade base
+          python -m alembic upgrade head
+
   evaluation:
     runs-on: ubuntu-latest
     steps:

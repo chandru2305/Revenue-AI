@@ -47,7 +47,7 @@ result is `STOPPED` — the AI's confidence never enters that decision.
 ## AI failure is a first-class, tested scenario
 
 ```
-Gemini unavailable
+Groq unavailable
        |
 AI diagnosis fails (timeout / auth / rate limit / malformed output / network)
        |
@@ -61,7 +61,7 @@ Audit event: decision_source=fallback, failure_code=<classified exception>
 ```
 
 This exact path was exercised live during Phase 2 development — with no
-`GEMINI_API_KEY` configured, every diagnosis in this environment took it,
+`GROQ_API_KEY` configured, every diagnosis in this environment took it,
 including through the actual browser UI (see the Phase 2 report for a
 screenshot). It's also unit- and integration-tested for every distinct
 failure mode: `backend/tests/test_ai_service.py` (timeout, auth error,

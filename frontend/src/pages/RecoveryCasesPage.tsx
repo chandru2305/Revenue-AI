@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { api } from "../api/client";
 import { useApiResource } from "../api/useApiResource";
-import type { RecoveryCaseStatus } from "../api/types";
+import type { RecoveryCaseStatus, SystemInfo } from "../api/types";
 import { formatMoney, formatPercent, formatRelative, humanize } from "../lib/format";
 import { statusTone } from "../lib/labels";
 import { CaseDrawer } from "../components/CaseDrawer";
@@ -20,7 +20,7 @@ const FILTERS: (RecoveryCaseStatus | "all")[] = [
   "failed",
 ];
 
-export function RecoveryCasesPage() {
+export function RecoveryCasesPage({ system }: { system?: SystemInfo | null }) {
   const { state, refetch } = useApiResource(() => api.listRecoveryCases({ page: 1, page_size: 100 }), []);
   const [filter, setFilter] = useState<RecoveryCaseStatus | "all">("all");
   const [selected, setSelected] = useState<string | null>(null);
@@ -124,6 +124,7 @@ export function RecoveryCasesPage() {
       {selected && (
         <CaseDrawer
           caseId={selected}
+          system={system}
           onClose={() => setSelected(null)}
           onMutated={refetch}
         />

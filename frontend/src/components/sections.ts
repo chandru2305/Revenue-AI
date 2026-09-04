@@ -1,5 +1,5 @@
 export const SECTIONS = [
-  "Overview",
+  "Command Center",
   "Recovery Cases",
   "Policy Decisions",
   "Audit Trail",
@@ -9,13 +9,13 @@ export const SECTIONS = [
 export type Section = (typeof SECTIONS)[number];
 
 export const SECTION_GROUPS: { label: string; items: Section[] }[] = [
-  { label: "Operations", items: ["Overview", "Recovery Cases"] },
+  { label: "Operations", items: ["Command Center", "Recovery Cases"] },
   { label: "Assurance", items: ["Policy Decisions", "Audit Trail"] },
   { label: "Analysis", items: ["Evaluation"] },
 ];
 
 export const SECTION_CRUMB: Record<Section, string> = {
-  Overview: "Live recovery posture for this deployment",
+  "Command Center": "Autonomous recovery agent — discover, diagnose, decide, act, observe",
   "Recovery Cases": "Every failed-payment recovery opportunity",
   "Policy Decisions": "Deterministic ALLOW / BLOCK gate activity",
   "Audit Trail": "Append-only record of every decision and action",

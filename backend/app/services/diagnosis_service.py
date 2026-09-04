@@ -37,6 +37,7 @@ from app.domain.enums import (
     RecoveryCaseStatus,
 )
 from app.domain.policy import PolicyConfig, PolicyEvaluationInput, evaluate_policy
+from app.domain.providers.base import EXECUTABLE_ACTIONS
 from app.domain.state_machine import validate_transition
 from app.models.recovery_case import RecoveryCase
 from app.repositories.recovery_case_repository import RecoveryCaseRepository
@@ -210,10 +211,12 @@ async def _diagnose_recovery_case(
         correlation_id=correlation_id,
     )
 
-    next_status = _resolve_next_status(
+    next_status, transition_reason = _resolve_next_status(
         outcome.recommendation.recommended_action, decision.decision, decision.reason_codes
     )
-    await _transition(session, case, next_status, correlation_id=correlation_id)
+    await _transition(
+        session, case, next_status, correlation_id=correlation_id, reason=transition_reason
+    )
 
     await session.commit()
 
@@ -268,14 +271,26 @@ async def _evaluate_eligibility(session: AsyncSession, case: RecoveryCase, *, co
 
 def _resolve_next_status(
     action: RecoveryAction, decision: PolicyDecisionType, reason_codes: list[PolicyReasonCode]
-) -> RecoveryCaseStatus:
+) -> tuple[RecoveryCaseStatus, str | None]:
+    """Maps a policy outcome to the case's next status, plus a human-readable
+    reason for the transition (None when the status speaks for itself)."""
     if decision == PolicyDecisionType.ALLOW:
         if action == RecoveryAction.STOP:
-            return RecoveryCaseStatus.STOPPED
+            return RecoveryCaseStatus.STOPPED, None
         if action == RecoveryAction.ESCALATE:
-            return RecoveryCaseStatus.ESCALATED
-        return RecoveryCaseStatus.APPROVED
+            return RecoveryCaseStatus.ESCALATED, None
+        if action not in EXECUTABLE_ACTIONS:
+            # Policy permits it, but nothing can carry it out. APPROVED
+            # means "ready to execute", so routing here would have the case
+            # advertise an action that could only ever fail at execution
+            # time. Hand it to a human now, with the real reason.
+            return (
+                RecoveryCaseStatus.ESCALATED,
+                f"Action '{action.value}' is permitted by policy but has no executor "
+                "implementation; routing to human review instead of APPROVED.",
+            )
+        return RecoveryCaseStatus.APPROVED, None
 
     if any(code in _HARD_STOP_REASON_CODES for code in reason_codes):
-        return RecoveryCaseStatus.STOPPED
-    return RecoveryCaseStatus.ESCALATED
+        return RecoveryCaseStatus.STOPPED, None
+    return RecoveryCaseStatus.ESCALATED, None

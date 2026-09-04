@@ -20,22 +20,34 @@ export function IngestPaymentModal({ onClose, onDone }: { onClose: () => void; o
   const [failureReason, setFailureReason] = useState<FailureReason>("insufficient_funds");
   const [method, setMethod] = useState<PaymentMethodType>("card");
   const [reference, setReference] = useState("");
+  const [providerId, setProviderId] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [note, setNote] = useState<string | null>(null);
 
   async function submit() {
     setBusy(true);
     setError(null);
+    setNote(null);
     try {
-      await api.ingestPayment({
+      const r = await api.ingestPayment({
         amount: Math.round(Number(amountRupees) * 100),
         failure_reason: failureReason,
         payment_method_type: method,
         customer_reference: reference.trim() || null,
+        provider_payment_id: providerId.trim() || null,
         auto_create_case: true,
       });
       onDone();
-      onClose();
+      if (r.deduplicated) {
+        setNote(
+          `Duplicate event — provider_payment_id "${providerId.trim()}" already ingested. ` +
+            `Returned the existing case, no new record created.`,
+        );
+        setBusy(false);
+      } else {
+        onClose();
+      }
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Could not reach the API.");
       setBusy(false);
@@ -90,6 +102,16 @@ export function IngestPaymentModal({ onClose, onDone }: { onClose: () => void; o
               onChange={(e) => setReference(e.target.value)}
             />
           </div>
+          <div className="field field--full">
+            <span className="field__label">Provider payment ID (optional)</span>
+            <input
+              className="input"
+              placeholder="pay_evt_001 — resend the same id to test idempotency"
+              value={providerId}
+              onChange={(e) => setProviderId(e.target.value)}
+            />
+          </div>
+          {note && <p className="inline-note" style={{ borderLeftColor: "var(--warn)" }}>{note}</p>}
           {error && <p className="state state--error" style={{ padding: "8px 12px" }}>{error}</p>}
         </div>
         <div className="modal__foot">

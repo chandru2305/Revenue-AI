@@ -70,6 +70,58 @@ def test_parse_event_handles_completely_empty_payload():
     assert event.dedup_key == "::"
 
 
+def test_provider_event_id_is_preferred_over_the_payload_derived_key():
+    payload = {
+        "event": "payment_link.paid",
+        "payload": {
+            "payment_link": {"entity": {"id": "plink_abc123", "status": "paid", "amount_paid": 50000}},
+            "payment": {"entity": {"id": "pay_xyz789"}},
+        },
+    }
+    event = parse_event(payload, event_id="evt_00000001")
+    assert event.dedup_key == "event_id:evt_00000001"
+    assert event.dedup_key_source == "event_id"
+    # Everything else still parses identically.
+    assert event.payment_link_id == "plink_abc123"
+    assert event.payment_link_status == "paid"
+    assert event.amount_paid == 50000
+
+
+def test_falls_back_to_the_payload_key_when_no_event_id_header():
+    payload = {
+        "event": "payment_link.paid",
+        "payload": {
+            "payment_link": {"entity": {"id": "plink_abc123", "status": "paid"}},
+            "payment": {"entity": {"id": "pay_xyz789"}},
+        },
+    }
+    for missing in (None, ""):
+        event = parse_event(payload, event_id=missing)
+        assert event.dedup_key == "payment_link.paid:plink_abc123:pay_xyz789"
+        assert event.dedup_key_source == "payload"
+
+
+def test_same_event_id_beats_a_differing_payload():
+    """A redelivery whose body differs (different payment entity) must
+    still dedup to the same key when the provider event id matches."""
+    a = parse_event({"event": "payment_link.paid"}, event_id="evt_same")
+    b = parse_event(
+        {
+            "event": "payment_link.paid",
+            "payload": {"payment": {"entity": {"id": "pay_different"}}},
+        },
+        event_id="evt_same",
+    )
+    assert a.dedup_key == b.dedup_key
+
+
+def test_distinct_event_ids_produce_distinct_keys():
+    payload = {"event": "payment_link.paid"}
+    assert parse_event(payload, event_id="evt_1").dedup_key != parse_event(
+        payload, event_id="evt_2"
+    ).dedup_key
+
+
 def test_two_deliveries_of_the_same_event_produce_the_same_dedup_key():
     payload = {
         "event": "payment_link.paid",
