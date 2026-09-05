@@ -67,6 +67,15 @@ services:
       RAZORPAY_WEBHOOK_SECRET: ${RAZORPAY_WEBHOOK_SECRET:-}
     ports:
       - "8000:8000"
+    volumes:
+      # app.services.evaluation_service.REPORTS_DIR resolves to
+      # <repo-root>/evaluation/reports on a local run (3 parents up from
+      # backend/app/services/); inside this container /app *is* the
+      # backend/ build context, so that same parents-walk lands at
+      # container-root /evaluation/reports, not /app/evaluation/reports.
+      # Mounted read-only: the container only ever reads reports the host
+      # (or a separate evaluation venv) writes — it never generates one.
+      - ./evaluation/reports:/evaluation/reports:ro
     healthcheck:
       test:
         - CMD

@@ -39,6 +39,27 @@ class AuditEventRepository(BaseRepository[AuditEvent]):
         rows = (await self.session.execute(stmt.offset(offset).limit(limit))).scalars().all()
         return list(rows), total
 
+    async def list_for_export(
+        self,
+        entity_type: str | None = None,
+        entity_id: uuid.UUID | None = None,
+        event_type: str | None = None,
+        correlation_id: str | None = None,
+    ) -> list[AuditEvent]:
+        """Every matching event, oldest first, unpaginated — for the audit
+        export endpoint. Export must reproduce the trail's real order, not
+        the reverse-chronological order the list view uses for operators."""
+        stmt = select(AuditEvent).order_by(AuditEvent.created_at.asc())
+        if entity_type is not None:
+            stmt = stmt.where(AuditEvent.entity_type == entity_type)
+        if entity_id is not None:
+            stmt = stmt.where(AuditEvent.entity_id == entity_id)
+        if event_type is not None:
+            stmt = stmt.where(AuditEvent.event_type == event_type)
+        if correlation_id is not None:
+            stmt = stmt.where(AuditEvent.correlation_id == correlation_id)
+        return list((await self.session.execute(stmt)).scalars().all())
+
     async def get_case_timeline(
         self, case_id: uuid.UUID, attempt_ids: list[uuid.UUID]
     ) -> list[AuditEvent]:

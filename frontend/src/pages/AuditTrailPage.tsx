@@ -1,9 +1,10 @@
 import { Fragment, useMemo, useState } from "react";
-import { api } from "../api/client";
+import { api, ApiError } from "../api/client";
 import { useApiResource } from "../api/useApiResource";
 import type { ActorType, AuditEventRead, SystemInfo } from "../api/types";
 import { formatDateTime, formatRelative, humanize } from "../lib/format";
 import { ACTOR_TYPES, actorTone, ENTITY_TYPES } from "../lib/labels";
+import { saveBlob } from "../lib/download";
 import { CaseDrawer } from "../components/CaseDrawer";
 import { Badge, Button, Copyable, EmptyState, ErrorState, JsonBlock, LoadingState } from "../components/ui";
 
@@ -17,6 +18,8 @@ export function AuditTrailPage({ system }: { system?: SystemInfo | null }) {
   const [page, setPage] = useState(1);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [openCase, setOpenCase] = useState<string | null>(null);
+  const [exporting, setExporting] = useState<"csv" | "json" | null>(null);
+  const [exportError, setExportError] = useState<string | null>(null);
 
   const { state, refetch } = useApiResource(
     () =>
@@ -43,11 +46,29 @@ export function AuditTrailPage({ system }: { system?: SystemInfo | null }) {
   const total = state.status === "success" ? state.data.total : 0;
   const pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
+  async function handleExport(format: "csv" | "json") {
+    setExporting(format);
+    setExportError(null);
+    try {
+      const blob = await api.exportAuditEvents(format, {
+        entity_type: entityType || undefined,
+        event_type: eventType.trim() || undefined,
+        correlation_id: correlationId.trim() || undefined,
+      });
+      saveBlob(blob, `audit_trail.${format}`);
+    } catch (err) {
+      setExportError(err instanceof ApiError ? err.message : "Could not reach the RecoverAI API.");
+    } finally {
+      setExporting(null);
+    }
+  }
+
   return (
     <>
       <p className="page-intro">
         Append-only record of every decision and action, newest first. Nothing here is ever edited or
-        deleted. Filter by entity, event type, or a correlation ID to trace one request end to end.
+        deleted. Filter by entity, event type, or a correlation ID to trace one request end to end, or
+        download the full matching trail below.
       </p>
 
       <div className="toolbar">
@@ -99,7 +120,25 @@ export function AuditTrailPage({ system }: { system?: SystemInfo | null }) {
         <Button size="sm" variant="ghost" onClick={refetch}>
           Refresh
         </Button>
+        <Button
+          size="sm"
+          onClick={() => handleExport("csv")}
+          disabled={exporting !== null}
+          title="Downloads the full matching trail (unpaginated, oldest first) as CSV"
+        >
+          {exporting === "csv" ? "Exporting…" : "Download CSV"}
+        </Button>
+        <Button
+          size="sm"
+          onClick={() => handleExport("json")}
+          disabled={exporting !== null}
+          title="Downloads the full matching trail (unpaginated, oldest first) as JSON"
+        >
+          {exporting === "json" ? "Exporting…" : "Download JSON"}
+        </Button>
       </div>
+
+      {exportError && <ErrorState message={exportError} />}
 
       {state.status === "loading" && <LoadingState label="Loading audit events…" />}
       {state.status === "error" && <ErrorState message={state.error} />}

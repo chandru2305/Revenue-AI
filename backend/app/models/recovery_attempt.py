@@ -40,7 +40,10 @@ class RecoveryAttempt(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     # document). Unique so a bug can never silently create two attempts
     # with the same key.
     idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True, unique=True)
-    correlation_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    # 128, matching AuditEvent.correlation_id — see that column's comment.
+    # An orchestrator-driven execution passes the same
+    # "<cycle_correlation_id>:<case_id>" value in here.
+    correlation_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
 
     failure_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     failure_message: Mapped[str | None] = mapped_column(Text, nullable=True)

@@ -147,6 +147,27 @@ export const api = {
   listAuditEvents: (params?: AuditQuery) =>
     request<PaginatedResponse<AuditEventRead>>(`${API_V1_PREFIX}/audit-events`, params),
 
+  // Downloads the same append-only rows, unpaginated, oldest first. A
+  // plain <a href> can't carry the X-API-Key header, so this fetches the
+  // file as a Blob for the caller to save (see lib/download.ts).
+  exportAuditEvents: async (
+    format: "csv" | "json",
+    params?: Omit<AuditQuery, "page" | "page_size">,
+  ): Promise<Blob> => {
+    const url = new URL(`${API_BASE_URL}${API_V1_PREFIX}/audit-events/export`);
+    url.searchParams.set("format", format);
+    if (params) {
+      for (const [key, value] of Object.entries(params) as [string, unknown][]) {
+        if (value !== undefined && value !== null && value !== "") {
+          url.searchParams.set(key, String(value));
+        }
+      }
+    }
+    const response = await fetch(url.toString(), { headers: { ...authHeaders() } });
+    if (!response.ok) throw await parseError(response, "/audit-events/export");
+    return response.blob();
+  },
+
   getEvaluationSummary: () => request<EvaluationSummaryRead>(`${API_V1_PREFIX}/evaluation/summary`),
 
   getRecoverySummary: () => request<RecoverySummaryRead>(`${API_V1_PREFIX}/evaluation/recovery-summary`),

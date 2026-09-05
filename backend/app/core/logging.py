@@ -25,7 +25,10 @@ _correlation_id_ctx: ContextVar[str | None] = ContextVar("correlation_id", defau
 _REDACTED_KEY_FRAGMENTS = ("password", "secret", "token", "api_key", "authorization")
 
 
-def _is_redacted_key(key: str) -> bool:
+def is_redacted_key(key: str) -> bool:
+    """Public so other modules that must never leak a credential-shaped
+    field (e.g. the audit export) can reuse the exact same check rather
+    than re-deriving their own fragment list."""
     lowered = key.lower()
     return any(fragment in lowered for fragment in _REDACTED_KEY_FRAGMENTS)
 
@@ -53,7 +56,7 @@ class JsonFormatter(logging.Formatter):
         extra = getattr(record, "extra_fields", None)
         if isinstance(extra, dict):
             for key, value in extra.items():
-                if _is_redacted_key(key):
+                if is_redacted_key(key):
                     continue
                 payload[key] = value
 
