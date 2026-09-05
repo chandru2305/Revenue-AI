@@ -1,52 +1,60 @@
 import { useEffect, useState } from "react";
 import { api } from "../api/client";
 import { useApiResource } from "../api/useApiResource";
-import type { AuditEventRead, RecoverySummaryRead } from "../api/types";
+import type { AuditEventRead, LastCycleSummary, RecoverySummaryRead } from "../api/types";
 import { formatMoney, formatNumber, formatRelative, humanize } from "../lib/format";
 import { Button } from "./ui";
 
 type StageState = "pending" | "running" | "completed";
 
-const STAGES: { key: string; label: string; events: string[]; blurb: string }[] = [
-  {
-    key: "discover",
-    label: "Discover",
-    events: ["recovery_case_created", "payment_ingested"],
-    blurb: "Failed payments with no case yet",
-  },
-  {
-    key: "diagnose",
-    label: "Diagnose",
-    events: ["diagnosis_requested", "ai_diagnosis_created", "recovery_recommendation_created"],
-    blurb: "Groq proposes a cause + action",
-  },
-  {
-    key: "decide",
-    label: "Decide",
-    events: ["policy_evaluated", "policy_rechecked"],
-    blurb: "Deterministic policy allows / blocks",
-  },
-  {
-    key: "act",
-    label: "Act",
-    events: ["execution_requested", "execution_started", "payment_link_created"],
-    blurb: "Execute only permitted actions",
-  },
-  {
-    key: "observe",
-    label: "Observe",
-    events: ["payment_confirmed", "payment_not_recovered", "webhook_unmatched_payment_link"],
-    blurb: "Verify the outcome via webhook",
-  },
+const STAGES: { key: string; label: string; blurb: string }[] = [
+  { key: "discover", label: "Discover", blurb: "Failed payments with no case yet" },
+  { key: "diagnose", label: "Diagnose", blurb: "Groq proposes a cause + action" },
+  { key: "decide", label: "Decide", blurb: "Deterministic policy allows / blocks" },
+  { key: "act", label: "Act", blurb: "Execute only permitted actions" },
+  { key: "observe", label: "Observe", blurb: "Verify the outcome via webhook" },
 ];
 
 const RECENT_MS = 8000;
 
-function stageState(events: AuditEventRead[], stageEvents: string[], now: number): StageState {
-  const matches = events.filter((e) => stageEvents.includes(e.event_type));
-  if (matches.length === 0) return "pending";
-  const newest = Math.max(...matches.map((e) => new Date(e.created_at).getTime()));
-  return now - newest < RECENT_MS ? "running" : "completed";
+const WEBHOOK_EVENTS = new Set(["payment_confirmed", "payment_not_recovered"]);
+
+/**
+ * `POST /orchestrator/cycle` is one blocking HTTP call — discover, diagnose,
+ * decide, and act all happen server-side before anything comes back, so
+ * there is no true incremental progress to poll mid-request. While the
+ * request is in flight every stage is shown as "running" together, rather
+ * than faking a stage-by-stage timeline from event recency (which used to
+ * mark a stage "completed" the instant *any* matching event existed
+ * anywhere in the last 40 audit events — including ones from an earlier
+ * cycle, or a manual "Ingest payment event" click that never touched the
+ * agent at all). Once the response resolves, each stage's state comes
+ * straight from that cycle's own counts — not a second guess from history.
+ */
+function computeStages(
+  running: boolean,
+  lastCycle: LastCycleSummary | null,
+  events: AuditEventRead[],
+): Record<string, StageState> {
+  if (running) {
+    return { discover: "running", diagnose: "running", decide: "running", act: "running", observe: "running" };
+  }
+  if (!lastCycle) {
+    return { discover: "pending", diagnose: "pending", decide: "pending", act: "pending", observe: "pending" };
+  }
+  // Confirmation always arrives after (and separately from) the cycle that
+  // executed — a webhook is never part of the same request. This checks
+  // for *any* recent confirmation rather than one tied to this exact
+  // cycle's cases, since the two are necessarily decoupled in this
+  // architecture; still real events, never fabricated.
+  const observed = events.some((e) => WEBHOOK_EVENTS.has(e.event_type));
+  return {
+    discover: "completed", // the discover sweep always runs as part of every cycle
+    diagnose: lastCycle.cases_diagnosed > 0 ? "completed" : "pending",
+    decide: lastCycle.cases_diagnosed > 0 ? "completed" : "pending", // policy evaluation is inseparable from diagnosis
+    act: lastCycle.cases_executed > 0 ? "completed" : "pending",
+    observe: observed ? "completed" : "pending",
+  };
 }
 
 export function AgentConsole({
@@ -115,6 +123,7 @@ export function AgentConsole({
       : "No cycle in progress";
 
   const lc = status?.last_cycle ?? null;
+  const stages = computeStages(running, lc, events);
   const recoveredCount = summary?.cases_by_status?.recovered ?? 0;
 
   const counts: { label: string; value: number; tone?: string }[] = [
@@ -156,7 +165,7 @@ export function AgentConsole({
 
       <ol className="pipeline">
         {STAGES.map((stage, i) => {
-          const st = stageState(events, stage.events, now);
+          const st = stages[stage.key];
           return (
             <li key={stage.key} className={`pipeline__stage pipeline__stage--${st}`}>
               <span className="pipeline__index">{i + 1}</span>
